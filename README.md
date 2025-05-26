@@ -1,4 +1,5 @@
 Growatt- openinvertergateway json keys with explanation:
+ 
 
 ### System & Status / System & Status
 
