@@ -1,0 +1,1269 @@
+#include <SPI.h>
+#include <Ethernet.h>
+#include <ArduinoJson.h> // Make sure this library is installed
+
+#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSerif12pt7b.h>
+#include <FreeDefaultFonts.h>
+
+// Custom font includes - ensure these are correctly pathed or available
+// For example, if in the same directory:
+// #include "FreeSevenSegNumFont.h"
+// #include "FreeBigFont.h"
+// If these are part of Adafruit_GFX_Font_Custom, they might be found automatically
+// For this code, we assume they are accessible via the GFX font system.
+// If you have compilation errors related to these fonts, you'll need to ensure
+// the .h files for FreeSevenSegNumFont and FreeBigFont are present and correctly included.
+
+// If FreeSevenSegNumFont and FreeBigFont are not standard GFX fonts and are custom .h files,
+// you would typically include them like this:
+// #include "FreeSevenSegNumFont.h" // Assuming it's in your sketch directory or a library path
+// #include "FreeBigFont.h"       // Assuming it's in your sketch directory or a library path
+// And GFX will find them if they are correctly formatted.
+// The extern declarations are usually not needed if the .h files are included.
+// extern const GFXfont FreeSevenSegNumFont;
+// extern const GFXfont FreeBigFont;
+
+
+#include <Adafruit_GFX.h>    // Core graphics library
+#include <MCUFRIEND_kbv.h>   // Hardware-specific library for TFT
+MCUFRIEND_kbv tft;
+
+
+// Color Definitions
+#define BLACK   0x0000
+#define RED     0xF800
+#define GREEN   0x07E0 // Color for the field and gauge text
+#define WHITE   0xFFFF
+#define BLUE    0x001F
+#define GREY    0x8410
+#define SUN_YELLOW 0xFFE0
+#define SUN_ORANGE 0xFDA0
+#define MOON_LIGHT_GRAY 0xC618
+// #define MOWED_GREEN 0x0400 // Darker green for mowed text effect - REMOVED
+#define PALE_MOWED_GREEN 0x9FE9 // Lighter, paler green for mowed text - NO LONGER USED FOR THIS TEXT
+#define LIGHT_PALE_BLUE 0xCFEFFF // NEW: Light Pale Blue color
+
+// Scene Color Palette
+#define NIGHT_BG_COLOR    0x000A // Very dark blue
+#define DAY_BG_COLOR      0xAEFE // Very light blue for the sky
+#define MOON_COLOR        0xD69A
+#define MOON_FACE_COLOR   0xC618
+#define STICKMAN_COLOR    BLACK   // Stickman color for day
+#define STICKMAN_COLOR_NIGHT WHITE
+#define STAR_BRIGHT_COLOR WHITE
+#define STAR_DIM_COLOR    0x7BEF
+
+// Scene Dimensions
+#define FIELD_HEIGHT 40 // Height of the green field from the bottom
+
+// Juggling Animation Settings
+const int16_t JUGGLE_ARC_HEIGHT = 12; // Define globally - Scaled down
+const int16_t ballRadius = 2; // Juggling ball radius
+
+
+// Star Animation Settings
+#define NUM_STARS 30
+#define TWINKLE_BASE_INTERVAL 250
+
+bool isProbablyNight; // Flag to indicate day or night
+// Enum for managing daytime animation states
+enum DaytimeAnimationState {
+    ANIM_NONE,    // No animation active or just switched from night
+    ANIM_WALKING,
+    ANIM_WAVING
+};
+static DaytimeAnimationState currentDaytimeState = ANIM_NONE;
+
+// Add these for juggling state:
+static bool isJugglingActive = true;       // Controls if stickman is currently juggling
+static bool prevFrameWasJuggling = true;   // Tracks if the *previous* frame had juggling (for clearing)
+static int mvalue_soc = 100;               // Stores the state of charge value, default to high
+static float selfOutputEnergyTotal_calculated = 0.0f; // To store calculated energy
+// Global variables to store the sign's bounding box for collision detection
+static int16_t g_signRectX, g_signRectY, g_signWidth, g_signHeight;
+static int16_t g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight;
+static bool g_signDimensionsValid = false; // Flag to indicate if globals hold valid data
+// Constants for the manually drawn Euro symbol
+const int16_t DEFAULT_MANUAL_EURO_WIDTH = 14;   // Increased width
+const int16_t DEFAULT_MANUAL_EURO_HEIGHT = 18;  // Increased height
+const int16_t DEFAULT_MANUAL_EURO_THICKNESS = 3; // Increased thickness
+// Star structure
+struct Star {
+    int16_t x;
+    int16_t y;
+    uint8_t radius;
+    uint16_t color;
+    unsigned long lastTwinkleTime;
+    bool isBright;
+    int twinkleInterval;
+};
+Star stars[NUM_STARS];
+
+// Moon Properties
+const int moonRadius = 15;
+int moonX;
+int moonY;
+
+// Ethernet Configuration
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+IPAddress ip(192, 168, 178, 37); // Static IP if DHCP fails
+IPAddress myDns(192, 168, 178, 1);
+EthernetClient client;
+char server[] = "192.168.178.36"; // Server IP address
+unsigned long lastConnectionTime = 0;
+const unsigned long postingInterval = 60000; // Interval for periodic data refresh (milliseconds)
+
+// Stick Figure Animation Variables
+int stickFigureX = 0;
+int stickFigureY;
+int stickFigureFrame = 0;
+unsigned long lastFrameTime = 0;
+const int animationInterval = 500; // Milliseconds between walk frames
+const int stickFigureSpeed = 2;   // Pixels to move per animation step
+
+// Stick figure dimensions (used for drawing and clearing)
+const int headRadius = 3 * 2; // Reduced
+const int bodyLength = 8 * 2; // Reduced
+const int armLength = 5 * 2;  // Reduced
+const int legLength = 6 * 2;  // Reduced
+const int stickFigureHeight = headRadius * 2 + bodyLength + legLength;
+const int stickFigureWidth = legLength * 2; // Approximate width for clearing
+
+// Stick Figure Waving Animation Variables
+int stickFigureWaveX; // X position for waving stickman
+int stickFigureWaveY; // Y position for waving stickman (feet)
+int waveFrame = 0;
+unsigned long lastWaveFrameTime = 0;
+const int waveAnimationInterval = 400; // Milliseconds between wave frames
+const int numWaveFrames = 2; // Number of frames in the wave animation (e.g., arm down, arm up)
+//const int waveArmReachBuffer = armLength / 2; // Extra height for wavin
+
+// For on-screen messages
+int msgNum = 1; // Current message line number
+const int SCREEN_PRINT_BASE_Y = 5; // Base Y for first message line
+const int SCREEN_PRINT_LINE_HEIGHT = 10; // Height of each message line
+const int SCREEN_PRINT_BASE_X = 2;     // Base X for messages
+
+// Function Prototypes
+void setupNightScene();
+void drawMoon();
+void drawStickManSleeping();
+void updateAndDrawStars(unsigned long currentTime);
+void initTft();
+void initNetwork();
+int getIntValue(const String &jsonStringObj, const char *targetKey);
+float getFloatValue(const String &jsonStringObj, const char *targetKey);
+void drawStickFigure(int16_t x, int16_t y, uint8_t frame, uint16_t color);
+void fillRectExclude(int16_t r1x, int16_t r1y, int16_t r1w, int16_t r1h, int16_t r2x, int16_t r2y, int16_t r2w, int16_t r2h, uint16_t color);
+void drawSun(int glow);
+void drawEnergyValueText(float energyValue); // RENAMED Prototype
+void drawGauge(const int value, const int value2, const int centerX, const int centerY, const int radius, const uint16_t outlineColor, const uint16_t fillColor, uint16_t textColor);
+void httpRequest();
+void walk(unsigned long wait);
+void animateNight();
+void showmsgXY(int x, int y_base, int sz, const GFXfont *f, const char *msg);
+void print(const char *text);
+void println(const char *text);
+void println(String text);
+void println(const IPAddress& ip_addr);
+void drawStickFigureWave(int16_t x, int16_t y, uint8_t frame, uint16_t color);
+void waveAnimation();
+void clearWavingStickmanArea(int16_t x_wave, int16_t y_wave);
+void clearCompleteWalkingAnimationArea(int16_t x_walk, int16_t y_walk);
+
+void drawManualEuroSymbol(int16_t x_tl, int16_t y_tl, int16_t w_total, int16_t h_total, int16_t thickness, uint16_t color) {
+    if (thickness < 1) thickness = 1;
+    // Ensure dimensions are large enough for the symbol to be drawn meaningfully
+    if (h_total < thickness * 2 + 3 || w_total < thickness * 2 + 3) return; // Adjusted minimum size
+
+    // Radii for the outer edge of the 'C' (ellipse)
+    float outer_radius_x = (float)w_total / 2.0f;
+    float outer_radius_y = (float)h_total / 2.0f;
+
+    // Radii for the inner edge of the 'C' (ellipse)
+    float inner_radius_x = outer_radius_x - thickness;
+    float inner_radius_y = outer_radius_y - thickness;
+
+    // Ensure inner radii are not negative; if so, the shape is filled
+    if (inner_radius_x < 0) inner_radius_x = 0;
+    if (inner_radius_y < 0) inner_radius_y = 0;
+
+    // Center of the arc for 'C'.
+    // Positioned so the C's bounding box matches x_tl, y_tl, w_total, h_total.
+    float center_x_arc = x_tl + outer_radius_x;
+    float center_y_arc = y_tl + outer_radius_y;
+
+    const int num_segments = 10; // Increased for a smoother elliptical curve
+    float start_angle_rad = PI * 0.20f; // Opening on the right (approx 36 degrees)
+    float end_angle_rad = PI * 1.80f;   // (approx 324 degrees)
+
+    float angle_step_rad = (end_angle_rad - start_angle_rad) / num_segments;
+
+    int16_t prev_ox = 0, prev_oy = 0, prev_ix = 0, prev_iy = 0;
+
+    for (int i = 0; i <= num_segments; ++i) {
+        float current_angle_rad = start_angle_rad + i * angle_step_rad;
+        // Outer points
+        int16_t ox = round(center_x_arc + outer_radius_x * cos(current_angle_rad));
+        int16_t oy = round(center_y_arc + outer_radius_y * sin(current_angle_rad));
+        // Inner points
+        int16_t ix = round(center_x_arc + inner_radius_x * cos(current_angle_rad));
+        int16_t iy = round(center_y_arc + inner_radius_y * sin(current_angle_rad));
+
+        if (i > 0) {
+            // Draw a quadrilateral segment of the thick arc using two triangles
+            tft.fillTriangle(prev_ox, prev_oy, ox, oy, prev_ix, prev_iy, color);
+            tft.fillTriangle(ox, oy, prev_ix, prev_iy, ix, iy, color);
+        }
+        prev_ox = ox; prev_oy = oy;
+        prev_ix = ix; prev_iy = iy;
+    }
+
+    // --- Draw the two horizontal lines ---
+    // Adjust these factors to change line length and spacing
+    float line_length_factor = 0.55f; // Proportion of w_total for line length
+    float line_vertical_offset_factor = 0.25f; // Proportion of h_total for vertical spacing from center
+
+    float line_len = w_total * line_length_factor;
+    if (line_len < thickness + 1.0f) line_len = thickness + 1.0f; // Ensure line is at least a bit longer than thick
+    if (line_len < 1.0f) line_len = 1.0f; // Absolute minimum length
+
+    float line_start_x = center_x_arc - line_len / 2.0f;
+
+    // Calculate Y positions for the top of the two lines
+    int16_t y1_line_top = round(center_y_arc - (outer_radius_y * line_vertical_offset_factor) - thickness / 2.0f);
+    int16_t y2_line_top = round(center_y_arc + (outer_radius_y * line_vertical_offset_factor) - thickness / 2.0f);
+
+    // Ensure lines are distinct if thickness is large
+    if (y1_line_top + thickness >= y2_line_top && thickness > 0) {
+        // If they would overlap or be too close, draw a single centered line
+        int16_t single_line_y = round(center_y_arc - thickness / 2.0f);
+        // Ensure this single line is still somewhat visible
+        if (line_len >=1 && thickness >=1) {
+             tft.fillRect(round(line_start_x), single_line_y, round(line_len), thickness, color);
+        }
+    } else {
+        if (line_len >=1 && thickness >=1) {
+            tft.fillRect(round(line_start_x), y1_line_top, round(line_len), thickness, color);
+            tft.fillRect(round(line_start_x), y2_line_top, round(line_len), thickness, color);
+        }
+    }
+}
+
+float getFloatValue(const String &jsonStringObj, const char *targetKey) {
+    int keyIndex = jsonStringObj.indexOf(targetKey);
+    if (keyIndex != -1) {
+        int valueStartIndex = jsonStringObj.indexOf(':', keyIndex) + 1;
+        int valueEndIndex = jsonStringObj.indexOf(',', valueStartIndex);
+        if (valueEndIndex == -1) {
+            valueEndIndex = jsonStringObj.indexOf('}', valueStartIndex);
+        }
+        if (valueStartIndex > 0 && valueEndIndex > valueStartIndex) {
+            String valueString = jsonStringObj.substring(valueStartIndex, valueEndIndex);
+            valueString.trim();
+            return valueString.toFloat();
+        } else {
+            print("Error: Could not find float value for key '"); print(targetKey); println("'.");
+        }
+    } else {
+        print("Error: Key '"); print(targetKey); println("' not found for float.");
+    }
+    return 0.0f;
+}
+
+
+bool checkRectOverlap(int16_t r1x, int16_t r1y, int16_t r1w, int16_t r1h,
+                      int16_t r2x, int16_t r2y, int16_t r2w, int16_t r2h) {
+    // Check if one rectangle is to the left of the other
+    if (r1x + r1w <= r2x || r2x + r2w <= r1x) {
+        return false;
+    }
+    // Check if one rectangle is above the other
+    if (r1y + r1h <= r2y || r2y + r2h <= r1y) {
+        return false;
+    }
+    return true; // Rectangles overlap
+}
+
+void clearWavingStickmanArea(int16_t x_wave, int16_t y_wave) {
+    int16_t clearStickManX = x_wave - stickFigureWidth / 2 - 2;
+    int16_t clearStickManW = stickFigureWidth + 4;
+    int16_t bodyTopY_wave = y_wave - legLength - bodyLength;
+    int16_t headTopY_wave = bodyTopY_wave - headRadius * 2;
+    const int16_t verticalClearBuffer = 2;
+    int16_t clearStickManY_Top = headTopY_wave - verticalClearBuffer;
+    int16_t clearStickManH = (y_wave + verticalClearBuffer) - clearStickManY_Top;
+    int16_t fieldTopPixelVal = tft.height() - FIELD_HEIGHT;
+    int16_t gaugeEffectiveRadius = 80 + 3;
+    int16_t gaugeBoxX = tft.width() / 2 - gaugeEffectiveRadius;
+    int16_t gaugeBoxY = tft.height() / 2 - gaugeEffectiveRadius;
+    int16_t gaugeBoxW = gaugeEffectiveRadius * 2;
+    int16_t gaugeBoxH = gaugeEffectiveRadius * 2;
+    if (clearStickManY_Top < fieldTopPixelVal) {
+        int16_t skyClearStartY = clearStickManY_Top;
+        int16_t skyClearHeight = min(clearStickManH, fieldTopPixelVal - skyClearStartY);
+        if (skyClearHeight > 0) {
+            fillRectExclude(clearStickManX, skyClearStartY, clearStickManW, skyClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+        }
+    }
+    int16_t fieldClearStartY = max(clearStickManY_Top, fieldTopPixelVal);
+    if (fieldClearStartY < clearStickManY_Top + clearStickManH) {
+        int16_t fieldClearHeight = (clearStickManY_Top + clearStickManH) - fieldClearStartY;
+        if (fieldClearHeight > 0) {
+            fillRectExclude(clearStickManX, fieldClearStartY, clearStickManW, fieldClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+        }
+    }
+}
+
+void clearCompleteWalkingAnimationArea(int16_t x_walk, int16_t y_walk) {
+    int16_t gaugeEffectiveRadius = 80 + 3;
+    int16_t gaugeBoxX = tft.width() / 2 - gaugeEffectiveRadius;
+    int16_t gaugeBoxY = tft.height() / 2 - gaugeEffectiveRadius;
+    int16_t gaugeBoxW = gaugeEffectiveRadius * 2;
+    int16_t gaugeBoxH = gaugeEffectiveRadius * 2;
+    int16_t fieldTopPixelVal = tft.height() - FIELD_HEIGHT;
+    int16_t clearStickManX = x_walk - stickFigureWidth / 2 - 2;
+    int16_t clearStickManY_Top = y_walk - stickFigureHeight - headRadius - 2;
+    int16_t clearStickManW = stickFigureWidth + 4;
+    int16_t clearStickManH = stickFigureHeight + headRadius + 4;
+    if (clearStickManY_Top < fieldTopPixelVal) {
+        int16_t skyClearStartY = clearStickManY_Top;
+        int16_t skyClearHeight = min(clearStickManH, fieldTopPixelVal - skyClearStartY);
+        if (skyClearHeight > 0) {
+            fillRectExclude(clearStickManX, skyClearStartY, clearStickManW, skyClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+        }
+    }
+    int16_t fieldClearStartY = max(clearStickManY_Top, fieldTopPixelVal);
+    if (fieldClearStartY < clearStickManY_Top + clearStickManH) {
+        int16_t fieldClearHeight = (clearStickManY_Top + clearStickManH) - fieldClearStartY;
+        if (fieldClearHeight > 0) {
+            fillRectExclude(clearStickManX, fieldClearStartY, clearStickManW, fieldClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+        }
+    }
+    if (isJugglingActive) {
+        int16_t shoulderY_walk = (y_walk - legLength - bodyLength) + bodyLength / 4;
+        int16_t jugglePeakY_walk = shoulderY_walk - headRadius * 2 - 20;
+        int16_t ballClearZoneX = x_walk - armLength - ballRadius - 5;
+        int16_t ballClearZoneY = jugglePeakY_walk - ballRadius - JUGGLE_ARC_HEIGHT - 10;
+        int16_t ballClearZoneW = (2 * armLength) + (2 * ballRadius) + 10;
+        int16_t ballClearZone_BottomY = shoulderY_walk + (armLength / 2) + ballRadius + 10;
+        int16_t ballClearZoneH = ballClearZone_BottomY - ballClearZoneY;
+        if (ballClearZoneH > 0) {
+            if (ballClearZoneY < fieldTopPixelVal) {
+                int16_t skyBallsClearH = min(ballClearZoneH, fieldTopPixelVal - ballClearZoneY);
+                if (skyBallsClearH > 0) fillRectExclude(ballClearZoneX, ballClearZoneY, ballClearZoneW, skyBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+            }
+            int16_t fieldBallsClearY_juggle = max(ballClearZoneY, fieldTopPixelVal);
+            if (fieldBallsClearY_juggle < ballClearZoneY + ballClearZoneH) {
+                int16_t fieldBallsClearH = (ballClearZoneY + ballClearZoneH) - fieldBallsClearY_juggle;
+                if (fieldBallsClearH > 0) fillRectExclude(ballClearZoneX, fieldBallsClearY_juggle, ballClearZoneW, fieldBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+            }
+        }
+    } else {
+        int16_t ballGroundY_clear = y_walk - ballRadius;
+        int16_t staticBallsClearWidth = armLength + (2 * ballRadius) + 4;
+        int16_t staticBallsClearHeight = (2 * ballRadius) + 2;
+        int16_t staticBallsClearX = x_walk - staticBallsClearWidth / 2;
+        int16_t staticBallsClearY = ballGroundY_clear - ballRadius - 1;
+        fillRectExclude(staticBallsClearX, staticBallsClearY, staticBallsClearWidth, staticBallsClearHeight,
+                        gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+    }
+}
+
+void setupNightScene() {
+    moonX = tft.width() - moonRadius - 10;
+    moonY = moonRadius + 10;
+    randomSeed(analogRead(A0));
+    for (int i = 0; i < NUM_STARS; i++) {
+        stars[i].x = random(tft.width());
+        stars[i].y = random(tft.height() - (isProbablyNight ? 0 : FIELD_HEIGHT));
+        stars[i].radius = random(2);
+        stars[i].isBright = random(2);
+        stars[i].color = stars[i].isBright ? STAR_BRIGHT_COLOR : STAR_DIM_COLOR;
+        stars[i].twinkleInterval = TWINKLE_BASE_INTERVAL + random(200);
+        stars[i].lastTwinkleTime = millis() + random(stars[i].twinkleInterval);
+    }
+}
+
+void drawMoon() {
+    int16_t moonBoundingBoxX = moonX - moonRadius - 1;
+    int16_t moonBoundingBoxY = moonY - moonRadius - 1;
+    int16_t moonBoundingBoxW = moonRadius * 2 + 2;
+    int16_t moonBoundingBoxH = moonRadius * 2 + 2;
+    tft.fillRect(moonBoundingBoxX, moonBoundingBoxY, moonBoundingBoxW, moonBoundingBoxH, NIGHT_BG_COLOR);
+    tft.fillCircle(moonX, moonY, moonRadius, MOON_COLOR);
+    tft.fillCircle(moonX - moonRadius / 3, moonY - moonRadius / 5, 2, MOON_FACE_COLOR);
+    tft.fillCircle(moonX + moonRadius / 3, moonY - moonRadius / 5, 2, MOON_FACE_COLOR);
+    int smileY = moonY + moonRadius / 4;
+    int smileOffsetX = moonRadius / 3;
+    int smileCurve = moonRadius / 8;
+    tft.drawLine(moonX - smileOffsetX, smileY, moonX - smileOffsetX / 2, smileY + smileCurve, MOON_FACE_COLOR);
+    tft.drawLine(moonX - smileOffsetX / 2, smileY + smileCurve, moonX + smileOffsetX / 2, smileY + smileCurve, MOON_FACE_COLOR);
+    tft.drawLine(moonX + smileOffsetX / 2, smileY + smileCurve, moonX + smileOffsetX, smileY, MOON_FACE_COLOR);
+}
+
+void waveAnimation() {
+    unsigned long currentTime = millis();
+    if (currentTime - lastWaveFrameTime > waveAnimationInterval) {
+        lastWaveFrameTime = currentTime;
+
+        int16_t prevStickFigureX_center = stickFigureWaveX; // Assuming stickFigureWaveX is center
+        int16_t prevStickFigureY_feet = stickFigureWaveY;   // Assuming stickFigureWaveY is feet
+
+        // --- 1. CLEAR PREVIOUS FRAME ARTIFACTS ---
+        // (Using the existing clearing logic from your waveAnimation)
+        int16_t clearStickManX_prev = prevStickFigureX_center - stickFigureWidth / 2 - 2;
+        int16_t bodyTopY_wave_prev = prevStickFigureY_feet - legLength - bodyLength;
+        int16_t headTopY_wave_prev = bodyTopY_wave_prev - headRadius * 2;
+        const int16_t verticalClearBuffer = 2;
+        int16_t clearStickManY_Top_prev = headTopY_wave_prev - verticalClearBuffer;
+        int16_t clearStickManW_prev = stickFigureWidth + 4;
+        int16_t clearStickManH_prev = (prevStickFigureY_feet + verticalClearBuffer) - clearStickManY_Top_prev;
+
+        int16_t fieldTopPixelVal = tft.height() - FIELD_HEIGHT;
+        int16_t gaugeEffectiveRadius = 80 + 3;
+        int16_t gaugeBoxX = tft.width() / 2 - gaugeEffectiveRadius;
+        int16_t gaugeBoxY = tft.height() / 2 - gaugeEffectiveRadius;
+        int16_t gaugeBoxW = gaugeEffectiveRadius * 2;
+        int16_t gaugeBoxH = gaugeEffectiveRadius * 2;
+
+        if (clearStickManY_Top_prev < fieldTopPixelVal) {
+            int16_t skyClearStartY = clearStickManY_Top_prev;
+            int16_t skyClearHeight = min(clearStickManH_prev, fieldTopPixelVal - skyClearStartY);
+            if (skyClearHeight > 0) {
+                 fillRectExclude(clearStickManX_prev, skyClearStartY, clearStickManW_prev, skyClearHeight,
+                                 gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+            }
+        }
+        int16_t fieldClearStartY = max(clearStickManY_Top_prev, fieldTopPixelVal);
+        if (fieldClearStartY < clearStickManY_Top_prev + clearStickManH_prev) {
+            int16_t fieldClearHeight = (clearStickManY_Top_prev + clearStickManH_prev) - fieldClearStartY;
+            if (fieldClearHeight > 0) {
+                fillRectExclude(clearStickManX_prev, fieldClearStartY, clearStickManW_prev, fieldClearHeight,
+                                gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+            }
+        }
+
+        // Current (new) stick figure position (for waving, position is static, frame changes)
+        int16_t currentStickFigureX_center = stickFigureWaveX;
+        int16_t currentStickFigureY_feet = stickFigureWaveY;
+
+        // --- COLLISION DETECTION ---
+        bool should_redraw_sign_this_frame = false;
+        if (!isProbablyNight && g_signDimensionsValid) {
+            // Bounding box for stickman (approximates clearing area)
+            // Since position is static for waving, new and prev physical bounds are the same.
+            // The check is more about whether the static waving figure overlaps.
+            int16_t sf_x = currentStickFigureX_center - stickFigureWidth / 2 - 2;
+            int16_t sf_y = currentStickFigureY_feet - stickFigureHeight - 2; // Approx.
+            int16_t sf_w = stickFigureWidth + 4;
+            int16_t sf_h = stickFigureHeight + 4; // Approx.
+
+            bool overlaps_sign_panel = checkRectOverlap(sf_x, sf_y, sf_w, sf_h, g_signRectX, g_signRectY, g_signWidth, g_signHeight);
+            bool overlaps_pole = checkRectOverlap(sf_x, sf_y, sf_w, sf_h, g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight);
+
+            if (overlaps_sign_panel || overlaps_pole) {
+                should_redraw_sign_this_frame = true;
+            }
+        }
+
+        // --- 2. REDRAW STATIC BACKGROUND ELEMENTS (like the sign) IF NEEDED ---
+        if (should_redraw_sign_this_frame) {
+            drawEnergyValueText(::selfOutputEnergyTotal_calculated);
+        }
+
+        // --- 3. UPDATE ANIMATION STATE ---
+        waveFrame = (waveFrame + 1) % numWaveFrames;
+
+        // --- 4. DRAW CURRENT FRAME OF ANIMATION ---
+        drawStickFigureWave(currentStickFigureX_center, currentStickFigureY_feet, waveFrame, STICKMAN_COLOR);
+    }
+}
+void drawStickFigureWave(int16_t x, int16_t y, uint8_t frame, uint16_t color) {
+    float upperArmSegmentRatio = 0.66f, foreArmSegmentRatio = 0.49f;
+    int16_t bodyTopY = y - legLength - bodyLength;
+    int16_t bodyBottomY = y - legLength;
+    int16_t shoulderY = bodyTopY + bodyLength / 4;
+    tft.drawCircle(x, bodyTopY - headRadius, headRadius, color);
+    tft.drawLine(x, bodyTopY, x, bodyBottomY, color);
+    tft.drawLine(x, bodyBottomY, x - legLength / 3, y, color);
+    tft.drawLine(x, bodyBottomY, x + legLength / 3, y, color);
+
+    // Left arm (non-waving, keep original length)
+    int16_t leftElbowX = x - armLength / 3;
+    int16_t leftElbowY = shoulderY + armLength / 3;
+    int16_t leftHandX = x - armLength / 2;
+    int16_t leftHandY = shoulderY + armLength * 0.8;
+    tft.drawLine(x, shoulderY, leftElbowX, leftElbowY, color);
+    tft.drawLine(leftElbowX, leftElbowY, leftHandX, leftHandY, color);
+
+    // Right arm (waving) - calculations for elbow and hand
+    int16_t rightElbowX, rightElbowY, rightHandX, rightHandY;
+
+    const float wavingArmLengthFactor = 1.2f; // Make waving arm 20% longer. Adjust as needed.
+
+    // Calculate actual lengths for the waving arm segments by scaling the base segment lengths
+    float upperArmActualLength = (armLength * upperArmSegmentRatio) * wavingArmLengthFactor;
+    float foreArmActualLength = (armLength * foreArmSegmentRatio) * wavingArmLengthFactor;
+
+    // Horizontal offset of the elbow from the body center for the waving arm
+    // Scale this offset as well to maintain arm posture if desired
+    float x_elbow_offset_from_center = (armLength * 0.60f) * wavingArmLengthFactor;
+
+    rightElbowX = x + round(x_elbow_offset_from_center);
+
+    // Calculate vertical offset of the elbow from the shoulder
+    // Using Pythagorean theorem: upperArmActualLength^2 = x_elbow_offset_from_center^2 + y_offset_from_shoulder_up^2
+    float y_offset_from_shoulder_squared = pow(upperArmActualLength, 2) - pow(x_elbow_offset_from_center, 2);
+    if (y_offset_from_shoulder_squared < 0) {
+        // This can happen if x_elbow_offset_from_center is too large compared to upperArmActualLength.
+        // Cap it to prevent sqrt of a negative number.
+        y_offset_from_shoulder_squared = 0;
+    }
+    float y_offset_from_shoulder_up = sqrt(y_offset_from_shoulder_squared);
+    rightElbowY = shoulderY - round(y_offset_from_shoulder_up); // Subtract for upward motion from shoulder
+
+    // Hand position relative to the elbow, based on frame (original logic preserved)
+    float hand_dx_factor, hand_dy_factor;
+    if (frame == 0) { // Original: Hand to right and slightly up from elbow
+        hand_dx_factor = 0.65f;
+        hand_dy_factor = 0.76f;
+    } else { // Original: Hand to right and more up from elbow
+        hand_dx_factor = 0.50f;
+        hand_dy_factor = 0.866f;
+    }
+
+    rightHandX = rightElbowX + round(foreArmActualLength * hand_dx_factor);
+    rightHandY = rightElbowY - round(foreArmActualLength * hand_dy_factor); // Original: Positive dy_factor moves hand UP
+
+    tft.drawLine(x, shoulderY, rightElbowX, rightElbowY, color);
+    tft.drawLine(rightElbowX, rightElbowY, rightHandX, rightHandY, color);
+}
+void drawStickManSleeping() {
+    int localHeadRadius = 8;
+    int torsoSittingHeight = 28;
+    int legSegmentLengthLocal = 25;
+    int armSegmentLengthLocal = 13;
+    int paddingBottom = 8;
+    int groundLevel = tft.height() - paddingBottom;
+    int hipBaseY = groundLevel;
+    int neckY = hipBaseY - torsoSittingHeight;
+    int hY = neckY - localHeadRadius;
+    int hX = localHeadRadius + 10;
+    int neckX = hX;
+    int hipX = hX + 5;
+    tft.fillRect(hX - localHeadRadius - 5, hY - localHeadRadius - 10, legSegmentLengthLocal * 2 + 20, localHeadRadius * 2 + torsoSittingHeight + legSegmentLengthLocal + 10, NIGHT_BG_COLOR);
+    tft.fillCircle(hX, hY, localHeadRadius, STICKMAN_COLOR_NIGHT);
+    tft.drawLine(neckX, neckY, hipX, hipBaseY, STICKMAN_COLOR_NIGHT);
+    int kneeX = hipX + legSegmentLengthLocal;
+    int kneeY = hipBaseY - 12;
+    tft.drawLine(hipX, hipBaseY, kneeX, kneeY, STICKMAN_COLOR_NIGHT);
+    int footX = kneeX + (legSegmentLengthLocal / 2) + 5;
+    int footY = hipBaseY;
+    tft.drawLine(kneeX, kneeY, footX, footY, STICKMAN_COLOR_NIGHT);
+    int shoulderY = neckY + 4;
+    int shoulderX_right = neckX + 2;
+    int elbow1X = shoulderX_right + armSegmentLengthLocal - 3;
+    int elbow1Y = shoulderY + armSegmentLengthLocal - 5;
+    tft.drawLine(shoulderX_right, shoulderY, elbow1X, elbow1Y, STICKMAN_COLOR_NIGHT);
+    int hand1X = kneeX - 4;
+    int hand1Y = kneeY;
+    tft.drawLine(elbow1X, elbow1Y, hand1X, hand1Y, STICKMAN_COLOR_NIGHT);
+    int shoulderX_left = neckX;
+    int elbowL_X = shoulderX_left;
+    int elbowL_Y = shoulderY + armSegmentLengthLocal;
+    tft.drawLine(shoulderX_left, shoulderY, elbowL_X, elbowL_Y, STICKMAN_COLOR_NIGHT);
+    int handL_X = shoulderX_left + 2;
+    int handL_Y = hipBaseY;
+    tft.drawLine(elbowL_X, elbowL_Y, handL_X, handL_Y, STICKMAN_COLOR_NIGHT);
+}
+
+void updateAndDrawStars(unsigned long currentTime) {
+    for (int i = 0; i < NUM_STARS; i++) {
+        uint16_t starBgColor = NIGHT_BG_COLOR;
+        if (!isProbablyNight && stars[i].y < tft.height() - FIELD_HEIGHT) {
+             starBgColor = DAY_BG_COLOR;
+        } else if (!isProbablyNight && stars[i].y >= tft.height() - FIELD_HEIGHT) {
+            starBgColor = GREEN;
+        }
+        if (stars[i].radius == 0) { tft.drawPixel(stars[i].x, stars[i].y, starBgColor); }
+        else { tft.fillCircle(stars[i].x, stars[i].y, stars[i].radius, starBgColor); }
+        if (isProbablyNight) {
+            if (currentTime - stars[i].lastTwinkleTime > stars[i].twinkleInterval) {
+                stars[i].isBright = !stars[i].isBright;
+                stars[i].color = stars[i].isBright ? STAR_BRIGHT_COLOR : STAR_DIM_COLOR;
+                stars[i].lastTwinkleTime = currentTime;
+            }
+            if (stars[i].radius == 0) { tft.drawPixel(stars[i].x, stars[i].y, stars[i].color); }
+            else { tft.fillCircle(stars[i].x, stars[i].y, stars[i].radius, stars[i].color); }
+        }
+    }
+}
+
+void showmsgXY(int x, int y_base, int sz, const GFXfont *f, const char *msg) {
+    int current_print_y = y_base + (msgNum - 1) * SCREEN_PRINT_LINE_HEIGHT;
+    if (current_print_y + SCREEN_PRINT_LINE_HEIGHT > tft.height()) {
+        msgNum = 1; current_print_y = y_base;
+    }
+    uint16_t messageBgColor = DAY_BG_COLOR;
+    if (isProbablyNight) { messageBgColor = NIGHT_BG_COLOR; }
+    else {
+        if (current_print_y >= (tft.height() - FIELD_HEIGHT) && (current_print_y + SCREEN_PRINT_LINE_HEIGHT) <= tft.height()) { messageBgColor = GREEN; }
+        else if (current_print_y < (tft.height() - FIELD_HEIGHT) && (current_print_y + SCREEN_PRINT_LINE_HEIGHT) > (tft.height() - FIELD_HEIGHT)) { /* Spans sky/field, default to sky for simplicity */ }
+    }
+    tft.fillRect(0, current_print_y, tft.width(), SCREEN_PRINT_LINE_HEIGHT, messageBgColor);
+    tft.setFont(f); tft.setCursor(x, current_print_y); tft.setTextColor(WHITE); tft.setTextSize(sz); tft.print(msg);
+    msgNum++;
+}
+
+void print(const char *text) { Serial.print(text); showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text); }
+void println(const char *text) { Serial.println(text); showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text); }
+void println(String text) { Serial.println(text); showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text.c_str()); }
+void println(const IPAddress& ip_addr) { String ipStr = String(ip_addr[0]) + "." + String(ip_addr[1]) + "." + String(ip_addr[2]) + "." + String(ip_addr[3]); Serial.println(ipStr); showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, ipStr.c_str()); }
+
+void initTft() { uint16_t ID = tft.readID(); if (ID == 0xD3D3) ID = 0x9481; tft.begin(ID); tft.setRotation(0); tft.fillScreen(BLACK); }
+
+void initNetwork() {
+    println("Initialize Ethernet with DHCP:");
+    if (Ethernet.begin(mac) == 0) {
+        println("Failed to configure Ethernet using DHCP");
+        if (Ethernet.hardwareStatus() == EthernetNoHardware) { println("Ethernet shield was not found. Halting."); while (true) { delay(1); } }
+        if (Ethernet.linkStatus() == LinkOFF) { println("Ethernet cable is not connected."); }
+        println("Attempting to use static IP."); Ethernet.begin(mac, ip, myDns); print("My IP address (static): "); println(Ethernet.localIP());
+    } else { print("DHCP assigned IP: "); println(Ethernet.localIP()); }
+}
+
+int getIntValue(const String &jsonStringObj, const char *targetKey) {
+    int keyIndex = jsonStringObj.indexOf(targetKey);
+    if (keyIndex != -1) {
+        int valueStartIndex = jsonStringObj.indexOf(':', keyIndex) + 1;
+        int valueEndIndex = jsonStringObj.indexOf(',', valueStartIndex);
+        if (valueEndIndex == -1) { valueEndIndex = jsonStringObj.indexOf('}', valueStartIndex); }
+        if (valueStartIndex > 0 && valueEndIndex > valueStartIndex) {
+            String valueString = jsonStringObj.substring(valueStartIndex, valueEndIndex);
+            valueString.trim(); return valueString.toInt();
+        } else { print("Error: Could not find value for key '"); print(targetKey); println("'."); }
+    } else { print("Error: Key '"); print(targetKey); println("' not found."); }
+    return 0;
+}
+
+void drawStickFigure(int16_t x, int16_t y, uint8_t frame, uint16_t color) {
+    tft.drawCircle(x, y - legLength - bodyLength - headRadius, headRadius, color);
+    int16_t bodyTopY = y - legLength - bodyLength;
+    int16_t bodyBottomY = y - legLength;
+    tft.drawLine(x, bodyTopY, x, bodyBottomY, color);
+    int16_t shoulderY = bodyTopY + bodyLength / 4;
+    const uint16_t ballColor1 = RED, ballColor2 = GREEN, ballColor3 = BLUE;
+
+    if (isJugglingActive) {
+        int16_t currentRightHandX, currentRightHandY, currentLeftHandX, currentLeftHandY;
+        if (frame == 0) {
+            currentLeftHandX = x - armLength; currentLeftHandY = shoulderY + armLength / 2;
+            tft.drawLine(x, shoulderY, currentLeftHandX, currentLeftHandY, color);
+            currentRightHandX = x + armLength; currentRightHandY = shoulderY - armLength / 2;
+            tft.drawLine(x, shoulderY, currentRightHandX, currentRightHandY, color);
+        } else {
+            currentLeftHandX = x - armLength; currentLeftHandY = shoulderY - armLength / 2;
+            tft.drawLine(x, shoulderY, currentLeftHandX, currentLeftHandY, color);
+            currentRightHandX = x + armLength; currentRightHandY = shoulderY + armLength / 2;
+            tft.drawLine(x, shoulderY, currentRightHandX, currentRightHandY, color);
+        }
+        if (frame == 0) {
+            tft.drawLine(x, bodyBottomY, x - 1 - legLength / 2, y, color);
+            tft.drawLine(x, bodyBottomY, x + 1 + legLength / 2, y, color);
+        } else {
+            tft.drawLine(x, bodyBottomY, x + legLength / 2, y, color);
+            tft.drawLine(x, bodyBottomY, x - legLength / 2, y, color);
+        }
+        static uint8_t juggle_phase = 0; juggle_phase = (juggle_phase + 1) % 6;
+        int16_t jugglePeakX = x; int16_t jugglePeakY = shoulderY - headRadius * 2 - 20;
+        int16_t ballX_coords[3], ballY_coords[3];
+        uint8_t ball_phases[3] = {juggle_phase, (uint8_t)((juggle_phase + 2) % 6), (uint8_t)((juggle_phase + 4) % 6)};
+        for (int i = 0; i < 3; ++i) {
+            switch (ball_phases[i]) {
+                case 0: ballX_coords[i] = currentRightHandX; ballY_coords[i] = currentRightHandY - ballRadius; break;
+                case 1: ballX_coords[i] = (currentRightHandX + jugglePeakX) / 2; ballY_coords[i] = (currentRightHandY + jugglePeakY) / 2 - JUGGLE_ARC_HEIGHT; break;
+                case 2: ballX_coords[i] = jugglePeakX; ballY_coords[i] = jugglePeakY - ballRadius; break;
+                case 3: ballX_coords[i] = (jugglePeakX + currentLeftHandX) / 2; ballY_coords[i] = (jugglePeakY + currentLeftHandY) / 2 - JUGGLE_ARC_HEIGHT; break;
+                case 4: ballX_coords[i] = currentLeftHandX; ballY_coords[i] = currentLeftHandY - ballRadius; break;
+                case 5: ballX_coords[i] = (currentLeftHandX + jugglePeakX) / 2; ballY_coords[i] = (currentLeftHandY + jugglePeakY) / 2 - JUGGLE_ARC_HEIGHT; break;
+            }
+        }
+        tft.fillCircle(ballX_coords[0], ballY_coords[0], ballRadius, ballColor1);
+        tft.fillCircle(ballX_coords[1], ballY_coords[1], ballRadius, ballColor2);
+        tft.fillCircle(ballX_coords[2], ballY_coords[2], ballRadius, ballColor3);
+    } else {
+        int16_t leftElbowX_static = x - armLength / 4; int16_t leftElbowY_static = shoulderY + armLength / 2;
+        int16_t leftHandX_static = x - armLength / 3; int16_t leftHandY_static = shoulderY + armLength * 0.9;
+        tft.drawLine(x, shoulderY, leftElbowX_static, leftElbowY_static, color);
+        tft.drawLine(leftElbowX_static, leftElbowY_static, leftHandX_static, leftHandY_static, color);
+        int16_t rightElbowX_static = x + armLength / 4; int16_t rightElbowY_static = shoulderY + armLength / 2;
+        int16_t rightHandX_static = x + armLength / 3; int16_t rightHandY_static = shoulderY + armLength * 0.9;
+        tft.drawLine(x, shoulderY, rightElbowX_static, rightElbowY_static, color);
+        tft.drawLine(rightElbowX_static, rightElbowY_static, rightHandX_static, rightHandY_static, color);
+        tft.drawLine(x, bodyBottomY, x - legLength / 3, y, color);
+        tft.drawLine(x, bodyBottomY, x + legLength / 3, y, color);
+        int16_t ballGroundY = y - ballRadius;
+        tft.fillCircle(x - armLength / 2 + ballRadius, ballGroundY, ballRadius, ballColor1);
+        tft.fillCircle(x, ballGroundY, ballRadius, ballColor2);
+        tft.fillCircle(x + armLength / 2 - ballRadius, ballGroundY, ballRadius, ballColor3);
+    }
+}
+
+void fillRectExclude(int16_t r1x, int16_t r1y, int16_t r1w, int16_t r1h, int16_t r2x, int16_t r2y, int16_t r2w, int16_t r2h, uint16_t color) {
+    if (r1w <= 0 || r1h <= 0) return;
+    if (r1x + r1w <= r2x || r1x >= r2x + r2w || r1y + r1h <= r2y || r1y >= r2y + r2h) { tft.fillRect(r1x, r1y, r1w, r1h, color); return; }
+    if (r1y < r2y) { int16_t h = min(r1h, r2y - r1y); if (h > 0) tft.fillRect(r1x, r1y, r1w, h, color); }
+    if (r1y + r1h > r2y + r2h) { int16_t y_start = max(r1y, r2y + r2h); int16_t h = (r1y + r1h) - y_start; if (h > 0) tft.fillRect(r1x, y_start, r1w, h, color); }
+    int16_t y_middle_strip_start = max(r1y, r2y); int16_t y_middle_strip_end = min(r1y + r1h, r2y + r2h);
+    int16_t h_middle_strip = y_middle_strip_end - y_middle_strip_start;
+    if (h_middle_strip > 0) {
+        if (r1x < r2x) { int16_t w = min(r1w, r2x - r1x); if (w > 0) tft.fillRect(r1x, y_middle_strip_start, w, h_middle_strip, color); }
+        if (r1x + r1w > r2x + r2w) { int16_t x_start = max(r1x, r2x + r2w); int16_t w = (r1x + r1w) - x_start; if (w > 0) tft.fillRect(x_start, y_middle_strip_start, w, h_middle_strip, color); }
+    }
+}
+
+void drawSun(int glow) {
+    const int16_t SUN_BODY_RADIUS = 15;
+    const int16_t SCREEN_EDGE_PADDING = 15;
+    const uint8_t MIN_NUM_RAYS = 0;
+    const uint8_t MAX_NUM_RAYS = 28;
+    const int16_t MIN_RAY_LENGTH = 0;
+    const int16_t MAX_RAY_LENGTH = 20;
+
+    if (!isProbablyNight) {
+        int16_t displayWidth = tft.width();
+        int16_t maxSunOverallRadius = SUN_BODY_RADIUS + MAX_RAY_LENGTH;
+        int16_t clearSunX_calc = displayWidth - maxSunOverallRadius - SCREEN_EDGE_PADDING - MAX_RAY_LENGTH;
+        int16_t clearSunY_calc = SCREEN_EDGE_PADDING - MAX_RAY_LENGTH;
+        int16_t clearSunSize = (maxSunOverallRadius + MAX_RAY_LENGTH) * 2;
+        int16_t sunClearAreaX = max(0, clearSunX_calc);
+        int16_t sunClearAreaY = max(0, clearSunY_calc);
+        int16_t sunClearAreaW = min(clearSunSize, displayWidth - sunClearAreaX);
+        int16_t sunClearAreaH = min(clearSunSize, (tft.height() - FIELD_HEIGHT) - sunClearAreaY);
+        sunClearAreaH = max(0, sunClearAreaH);
+        if (sunClearAreaW > 0 && sunClearAreaH > 0) {
+            int16_t gaugeEffectiveRadius = 80 + 3;
+            int16_t gaugeBoxX = tft.width() / 2 - gaugeEffectiveRadius;
+            int16_t gaugeBoxY = tft.height() / 2 - gaugeEffectiveRadius;
+            int16_t gaugeBoxW = gaugeEffectiveRadius * 2;
+            int16_t gaugeBoxH = gaugeEffectiveRadius * 2;
+            fillRectExclude(sunClearAreaX, sunClearAreaY, sunClearAreaW, sunClearAreaH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+        }
+    }
+
+    if (glow <= 0 || isProbablyNight) return;
+
+    float glowFactor = constrain(glow, 0, 5000) / 5000.0f;
+    uint8_t currentNumRays = MIN_NUM_RAYS + (uint8_t)(glowFactor * (MAX_NUM_RAYS - MIN_NUM_RAYS));
+    int16_t currentRayLength = MIN_RAY_LENGTH + (int16_t)(glowFactor * (MAX_RAY_LENGTH - MIN_RAY_LENGTH));
+    int16_t sunX = tft.width() - SUN_BODY_RADIUS - currentRayLength - SCREEN_EDGE_PADDING;
+    int16_t sunY = SUN_BODY_RADIUS + currentRayLength + SCREEN_EDGE_PADDING;
+
+    tft.fillCircle(sunX, sunY, SUN_BODY_RADIUS, SUN_YELLOW);
+
+    if (currentNumRays > 0 && currentRayLength > 0) {
+        float angleIncrementRad = (2 * PI) / currentNumRays;
+        for (uint8_t i = 0; i < currentNumRays; i++) {
+            float angleRad = i * angleIncrementRad;
+            int16_t startX = sunX + round(SUN_BODY_RADIUS * cos(angleRad));
+            int16_t startY = sunY + round(SUN_BODY_RADIUS * sin(angleRad));
+            int16_t endX = sunX + round((SUN_BODY_RADIUS + currentRayLength) * cos(angleRad));
+            int16_t endY = sunY + round((SUN_BODY_RADIUS + currentRayLength) * sin(angleRad));
+            tft.drawLine(startX, startY, endX, endY, SUN_ORANGE);
+        }
+    }
+}
+void drawEnergyValueText(float energyValue) {
+    // This function is designed to be called only during the day.
+
+    // --- Sign and Text Appearance Constants ---
+    const uint16_t SIGN_BG_COLOR = WHITE;
+    const uint16_t SIGN_BORDER_COLOR = BLACK;
+    const uint16_t SIGN_TEXT_COLOR = BLACK;
+    const int16_t SIGN_PADDING = 4; // Padding around the text inside the sign
+    const uint16_t POLE_COLOR = GREY;
+    const int16_t POLE_WIDTH = 5;
+    const int16_t SIGN_MARGIN_RIGHT = 5;
+    const int16_t SIGN_BOTTOM_CLEARANCE_ABOVE_GRASS = 3;
+    const int NUM_TEXT_SIZE = 2; // Text size for the numerical value and "E" (system font)
+    const int16_t POLE_DEPTH_IN_GRASS = 10;
+    const int16_t KERNING_BETWEEN_EURO_NUM = 1; // Space between "E" and number
+
+    // --- Prepare Text ---
+    char numberBuffer[10]; // For "XXXXX.X"
+    dtostrf(energyValue, 1, 1, numberBuffer);
+    const char* currencySymbol = "E"; // Using "E"
+
+    // --- Get Text Dimensions ---
+    int16_t x1_num, y1_num, x1_currency, y1_currency;
+    uint16_t w_num, h_num, w_currency, h_currency;
+
+    // Get bounds for the numerical part (system font)
+    tft.setFont(nullptr);
+    tft.setTextSize(NUM_TEXT_SIZE);
+    tft.getTextBounds(numberBuffer, 0, 0, &x1_num, &y1_num, &w_num, &h_num);
+
+    // Get bounds for the "E" symbol part (system font, same size)
+    tft.getTextBounds(currencySymbol, 0, 0, &x1_currency, &y1_currency, &w_currency, &h_currency);
+
+    // --- Calculate Combined Text Dimensions for Sign Content ---
+    // Order is now: E, kerning, Number
+    int16_t totalTextContentWidth = w_currency + KERNING_BETWEEN_EURO_NUM + w_num;
+
+    // Since both use system font and same text size, their heights (h_num, h_currency)
+    // and y1 offsets (y1_num, y1_currency, likely 0) will be consistent.
+    int16_t totalTextVisualHeight = h_currency; // or h_num, should be the same
+
+    // --- Calculate Sign Dimensions ---
+    int16_t signWidth = totalTextContentWidth + (2 * SIGN_PADDING);
+    int16_t signHeight = totalTextVisualHeight + (2 * SIGN_PADDING);
+
+    // --- Calculate Sign Position ---
+    int16_t fieldTopY = tft.height() - FIELD_HEIGHT;
+    int16_t signRectX = tft.width() - signWidth - SIGN_MARGIN_RIGHT;
+    int16_t signRectY = fieldTopY - SIGN_BOTTOM_CLEARANCE_ABOVE_GRASS - signHeight;
+    if (signRectY < 0) {
+        signRectY = 0;
+    }
+
+    // --- Calculate Pole Dimensions & Position ---
+    int16_t poleTopY = signRectY + signHeight;
+    int16_t poleBottomY = fieldTopY + POLE_DEPTH_IN_GRASS;
+    if (poleBottomY > tft.height()) {
+        poleBottomY = tft.height();
+    }
+    int16_t poleHeight = poleBottomY - poleTopY;
+    int16_t poleX = signRectX + (signWidth / 2) - (POLE_WIDTH / 2);
+
+    // --- Central Gauge Area (for exclusion during clearing) ---
+    int16_t gaugeEffectiveRadius = 80 + 3;
+    int16_t gaugeBoxX = tft.width() / 2 - gaugeEffectiveRadius;
+    int16_t gaugeBoxY = tft.height() / 2 - gaugeEffectiveRadius;
+    int16_t gaugeBoxW = gaugeEffectiveRadius * 2;
+    int16_t gaugeBoxH = gaugeEffectiveRadius * 2;
+
+    // --- Clear Area for Sign and Pole ---
+    fillRectExclude(signRectX, signRectY, signWidth, signHeight,
+                    gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+    if (poleHeight > 0) {
+        int16_t poleSkyPartTopY = poleTopY;
+        int16_t poleSkyPartBottomY = min(poleBottomY, fieldTopY);
+        int16_t poleSkyPartHeight = poleSkyPartBottomY - poleSkyPartTopY;
+        if (poleSkyPartHeight > 0) {
+            fillRectExclude(poleX, poleSkyPartTopY, POLE_WIDTH, poleSkyPartHeight,
+                            gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+        }
+        int16_t poleGrassPartTopY = max(poleTopY, fieldTopY);
+        int16_t poleGrassPartBottomY = poleBottomY;
+        int16_t poleGrassPartHeight = poleGrassPartBottomY - poleGrassPartTopY;
+        if (poleGrassPartHeight > 0) {
+            fillRectExclude(poleX, poleGrassPartTopY, POLE_WIDTH, poleGrassPartHeight,
+                            gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+        }
+    }
+
+    // --- Draw the Pole ---
+    if (poleHeight > 0) {
+        tft.fillRect(poleX, poleTopY, POLE_WIDTH, poleHeight, POLE_COLOR);
+    }
+
+    // --- Draw the Sign ---
+    tft.fillRect(signRectX, signRectY, signWidth, signHeight, SIGN_BG_COLOR);
+    tft.drawRect(signRectX, signRectY, signWidth, signHeight, SIGN_BORDER_COLOR);
+
+    // --- Draw the Text on the Sign ---
+    tft.setTextColor(SIGN_TEXT_COLOR, SIGN_BG_COLOR); // Opaque text
+    tft.setFont(nullptr); // Ensure system font
+    tft.setTextSize(NUM_TEXT_SIZE); // Ensure correct text size
+
+    // For system font, cursor sets the top-left. y1_num and y1_currency are 0.
+    // The drawing_origin_y is the top of the text content area within the sign.
+    int16_t drawing_origin_y = signRectY + SIGN_PADDING;
+
+    // Draw "E" Symbol Part first
+    // x1_currency is 0 for system font with (0,0) in getTextBounds
+    int16_t currency_cursor_x = signRectX + SIGN_PADDING - x1_currency;
+    tft.setCursor(currency_cursor_x, drawing_origin_y);
+    tft.print(currencySymbol);
+
+    // Draw Numerical Part after "E"
+    // x1_num is 0
+    int16_t num_cursor_x = currency_cursor_x + w_currency + KERNING_BETWEEN_EURO_NUM - x1_num;
+    tft.setCursor(num_cursor_x, drawing_origin_y);
+    tft.print(numberBuffer);
+
+
+    // Store sign and pole dimensions globally
+    g_signRectX = signRectX;
+    g_signRectY = signRectY;
+    g_signWidth = signWidth;
+    g_signHeight = signHeight;
+    g_poleRectX = poleX;
+    g_poleRectY = poleTopY;
+    g_poleWidth = POLE_WIDTH;
+    g_poleHeight = poleHeight;
+    g_signDimensionsValid = true;
+}
+
+void drawGauge(const int value, const int value2, const int centerX, const int centerY, const int radius,
+               const uint16_t outlineColor, const uint16_t fillColor, uint16_t textColor) {
+    tft.fillCircle(centerX, centerY, radius, MOON_LIGHT_GRAY);
+    tft.drawCircle(centerX, centerY, radius + 1, outlineColor);
+    tft.drawCircle(centerX, centerY, radius + 2, outlineColor);
+    float startAngle = PI * 0.75;
+    float endAngleValue1 = startAngle + (max(0, min(100, value)) / 100.0f) * (PI * 1.5f);
+    if (value > 0) {
+        for (float angle = startAngle; angle <= endAngleValue1; angle += 0.0333f) {
+            int x_arc = centerX + radius * cos(angle);
+            int y_arc = centerY + radius * sin(angle);
+            tft.drawLine(centerX, centerY, x_arc, y_arc, fillColor);
+        }
+    }
+    tft.fillCircle(centerX, centerY, radius - 10, WHITE);
+    float endAngleValue2 = startAngle + (max(0, min(100, value2)) / 100.0f) * (PI * 1.5f);
+    if (value2 > 0) {
+        for (float angle = startAngle; angle <= endAngleValue2; angle += 0.0666f) {
+            int x_arc = centerX + (radius - 5) * cos(angle);
+            int y_arc = centerY + (radius - 5) * sin(angle);
+            tft.drawLine(centerX, centerY, x_arc, y_arc, RED);
+        }
+    }
+    tft.fillCircle(centerX, centerY, radius - 12, WHITE);
+
+    String valueString = String(value);
+    String percentSign = "%";
+    int kerning = 2;
+    int16_t x1_num, y1_num, x1_pct, y1_pct;
+    uint16_t w_num, h_num, w_pct, h_pct;
+    const GFXfont *numFont = &FreeSevenSegNumFont;
+    const GFXfont *pctFont = &FreeBigFont;
+    tft.setFont(numFont); tft.setTextSize(1); tft.getTextBounds(valueString, 0, 0, &x1_num, &y1_num, &w_num, &h_num);
+    tft.setFont(pctFont); tft.setTextSize(1); tft.getTextBounds(percentSign, 0, 0, &x1_pct, &y1_pct, &w_pct, &h_pct);
+    int16_t overall_min_y1_offset = min(y1_num, y1_pct);
+    int16_t overall_max_y_plus_h_offset = max(y1_num + h_num, y1_pct + h_pct);
+    int16_t total_visual_height = overall_max_y_plus_h_offset - overall_min_y1_offset;
+    int16_t common_baseline_y = centerY - (total_visual_height / 2) - overall_min_y1_offset;
+    int16_t total_bitmap_width = w_num + kerning + w_pct;
+    int16_t num_bitmap_start_x = centerX - (total_bitmap_width / 2);
+    int16_t cursor_x_num = num_bitmap_start_x - x1_num;
+    int16_t pct_bitmap_start_x = num_bitmap_start_x + w_num + kerning;
+    int16_t cursor_x_pct = pct_bitmap_start_x - x1_pct;
+    tft.setFont(numFont); tft.setTextColor(textColor); tft.setTextSize(1); tft.setCursor(cursor_x_num, common_baseline_y); tft.print(valueString);
+    tft.setFont(pctFont); tft.setTextColor(textColor); tft.setTextSize(1); tft.setCursor(cursor_x_pct, common_baseline_y); tft.print(percentSign);
+    tft.setFont(NULL);
+}
+
+void httpRequest() {
+    client.stop();
+    bool requestLogicCompleted = false;
+    if (client.connect(server, 80)) {
+        println("Connecting to server...");
+        client.println("GET /status HTTP/1.0");
+        String hostHeader = "Host: "; hostHeader += server; client.println(hostHeader);
+        client.println("User-Agent: arduino-ethernet"); client.println("Connection: close"); client.println();
+        unsigned long timeout = millis();
+        while (client.available() == 0) { if (millis() - timeout > 5000) { println(">>> Client Timeout!"); client.stop(); goto end_request_logic; } }
+        String responseData = ""; unsigned long readTimeout = millis();
+        while (client.connected() || client.available()) {
+            if (client.available()) { responseData += (char)client.read(); readTimeout = millis(); }
+            if (millis() - readTimeout > 1000) { println(">>> Read Timeout during response."); break; }
+        }
+        client.stop();
+        int jsonStartIndex = responseData.indexOf('{'); int jsonEndIndex = responseData.lastIndexOf('}');
+        String jsonData = "";
+        if (jsonStartIndex != -1 && jsonEndIndex != -1 && jsonEndIndex > jsonStartIndex) { jsonData = responseData.substring(jsonStartIndex, jsonEndIndex + 1); }
+        else { println("No JSON data found in response."); goto end_request_logic; }
+
+        const char *BDCStateOfChargeKey = "\"BDCStateOfCharge\":";
+        ::mvalue_soc = getIntValue(jsonData, BDCStateOfChargeKey);
+        isJugglingActive = (::mvalue_soc >= 20);
+
+        const char *SelfOutputEnergyTotalKey = "\"SelfOutputEnergyTotal\":";
+        float rawEnergyTotal = getFloatValue(jsonData, SelfOutputEnergyTotalKey);
+        ::selfOutputEnergyTotal_calculated = rawEnergyTotal * 0.349f;
+
+        uint16_t fillColorGauge = GREEN;
+        if (::mvalue_soc < 33) fillColorGauge = RED;
+        else if (::mvalue_soc < 66) fillColorGauge = SUN_YELLOW;
+
+        const char *PVTotalPowerKey = "\"PVTotalPower\":";
+        int mvalue2 = getIntValue(jsonData, PVTotalPowerKey);
+        isProbablyNight = mvalue2 < 50;
+
+        if (isProbablyNight) { tft.fillScreen(NIGHT_BG_COLOR); }
+        else {
+           tft.fillRect(0, 0, tft.width(), tft.height() - FIELD_HEIGHT, DAY_BG_COLOR);
+           tft.fillRect(0, tft.height() - FIELD_HEIGHT, tft.width(), FIELD_HEIGHT, GREEN);
+           drawEnergyValueText(::selfOutputEnergyTotal_calculated); // Draw energy text on sky
+        }
+        setupNightScene();
+
+        const char *TotalLoadPowerKey = "\"BDCDischargePower\":";
+        int tvalue = getIntValue(jsonData, TotalLoadPowerKey);
+        int mappedValue = constrain(map(tvalue, 0, 6000, 0, 100), 0, 100);
+
+        drawGauge(::mvalue_soc, mappedValue, tft.width() / 2, tft.height() / 2, 80, BLUE, fillColorGauge, GREEN);
+        if (!isProbablyNight) {
+            drawSun(mvalue2);
+        }
+        lastConnectionTime = millis();
+        requestLogicCompleted = true;
+    } else {
+        println("Connection failed.");
+        lastConnectionTime = millis();
+    }
+
+end_request_logic:
+    stickFigureX = stickFigureWidth / 2 + 1;
+    stickFigureFrame = 0;
+    if (!requestLogicCompleted) {
+        if (isProbablyNight) { tft.fillScreen(NIGHT_BG_COLOR); }
+        else {
+           tft.fillRect(0, 0, tft.width(), tft.height() - FIELD_HEIGHT, DAY_BG_COLOR);
+           tft.fillRect(0, tft.height() - FIELD_HEIGHT, tft.width(), FIELD_HEIGHT, GREEN);
+           drawEnergyValueText(::selfOutputEnergyTotal_calculated); // Also draw if request failed but it's day
+        }
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    while (!Serial) {;}
+    println("Serial Initialized.");
+    initTft();
+    println("TFT Initialized.");
+    stickFigureY = tft.height() - 5;
+    stickFigureX = stickFigureWidth / 2 + 1;
+    stickFigureWaveX = stickFigureX;
+    stickFigureWaveY = stickFigureY;
+    lastWaveFrameTime = millis();
+    lastFrameTime = millis();
+    isJugglingActive = true;
+    prevFrameWasJuggling = true;
+    mvalue_soc = 100;
+    selfOutputEnergyTotal_calculated = 0.0f;
+    isProbablyNight = false;
+    setupNightScene();
+    println("Night Scene Setup Done (stars initialized).");
+    initNetwork();
+    println("Network Initialized.");
+}
+
+void animateNight() {
+    unsigned long currentTime = millis();
+    drawMoon();
+    updateAndDrawStars(currentTime);
+    drawStickManSleeping();
+}
+
+void walk(unsigned long wait) {
+    unsigned long currentTime = millis();
+    if (currentTime - lastFrameTime > animationInterval) {
+        lastFrameTime = currentTime;
+
+        int16_t prevStickFigureX_center = stickFigureX;
+        int16_t prevStickFigureY_feet = stickFigureY;
+
+        // --- 1. CLEAR PREVIOUS FRAME ARTIFACTS ---
+        // This existing logic clears the stickman body and balls at their PREVIOUS positions.
+        // It's crucial that this clearing is thorough.
+        int16_t gaugeEffectiveRadius = 80 + 3;
+        int16_t gaugeBoxX = tft.width() / 2 - gaugeEffectiveRadius;
+        int16_t gaugeBoxY = tft.height() / 2 - gaugeEffectiveRadius;
+        int16_t gaugeBoxW = gaugeEffectiveRadius * 2;
+        int16_t gaugeBoxH = gaugeEffectiveRadius * 2;
+        int16_t fieldTopPixelVal = tft.height() - FIELD_HEIGHT;
+
+        // Clearing for the stickman body at PREVIOUS position
+        int16_t clearStickManX_prev = prevStickFigureX_center - stickFigureWidth / 2 - 2;
+        int16_t clearStickManY_Top_prev = prevStickFigureY_feet - stickFigureHeight - 2; // Approx. top of head
+        int16_t clearStickManW_prev = stickFigureWidth + 4;
+        int16_t clearStickManH_prev = stickFigureHeight + 4; // Approx. full height + buffer
+
+        if (clearStickManY_Top_prev < fieldTopPixelVal) {
+            int16_t skyClearStartY = clearStickManY_Top_prev;
+            int16_t skyClearHeight = min(clearStickManH_prev, fieldTopPixelVal - skyClearStartY);
+            if (skyClearHeight > 0) {
+                fillRectExclude(clearStickManX_prev, skyClearStartY, clearStickManW_prev, skyClearHeight,
+                                gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+            }
+        }
+        int16_t fieldClearStartY = max(clearStickManY_Top_prev, fieldTopPixelVal);
+        if (fieldClearStartY < clearStickManY_Top_prev + clearStickManH_prev) {
+            int16_t fieldClearHeight = (clearStickManY_Top_prev + clearStickManH_prev) - fieldClearStartY;
+            if (fieldClearHeight > 0) {
+                fillRectExclude(clearStickManX_prev, fieldClearStartY, clearStickManW_prev, fieldClearHeight,
+                                gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+            }
+        }
+
+        // Clearing for juggling balls / static balls at PREVIOUS position
+        if (prevFrameWasJuggling) {
+            int16_t prevShoulderY = (prevStickFigureY_feet - legLength - bodyLength) + bodyLength / 4;
+            int16_t prevJugglePeakY = prevShoulderY - headRadius * 2 - 20;
+            int16_t ballClearZoneX = prevStickFigureX_center - armLength - ballRadius - 10;
+            int16_t ballClearZoneY = prevJugglePeakY - ballRadius - JUGGLE_ARC_HEIGHT - 10;
+            int16_t ballClearZoneW = (2 * armLength) + (2 * ballRadius) + 20;
+            int16_t ballClearZone_BottomY = prevShoulderY + (armLength / 2) + ballRadius + 10;
+            int16_t ballClearZoneH = ballClearZone_BottomY - ballClearZoneY;
+
+            if (ballClearZoneH > 0) {
+                if (ballClearZoneY < fieldTopPixelVal) { // Sky part
+                    int16_t skyBallsClearH = min(ballClearZoneH, fieldTopPixelVal - ballClearZoneY);
+                    if (skyBallsClearH > 0) fillRectExclude(ballClearZoneX, ballClearZoneY, ballClearZoneW, skyBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+                }
+                int16_t fieldBallsClearY_juggle = max(ballClearZoneY, fieldTopPixelVal); // Grass part
+                if (fieldBallsClearY_juggle < ballClearZoneY + ballClearZoneH) {
+                    int16_t fieldBallsClearH = (ballClearZoneY + ballClearZoneH) - fieldBallsClearY_juggle;
+                    if (fieldBallsClearH > 0) fillRectExclude(ballClearZoneX, fieldBallsClearY_juggle, ballClearZoneW, fieldBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+                }
+            }
+        } else { // Static balls
+            int16_t ballGroundY_clear = prevStickFigureY_feet - ballRadius;
+            int16_t staticBallsClearWidth = armLength + (2 * ballRadius) + 4;
+            int16_t staticBallsClearHeight = (2 * ballRadius) + 2;
+            int16_t staticBallsClearX = prevStickFigureX_center - staticBallsClearWidth / 2;
+            int16_t staticBallsClearY = ballGroundY_clear - ballRadius - 1;
+            fillRectExclude(staticBallsClearX, staticBallsClearY, staticBallsClearWidth, staticBallsClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+        }
+
+
+        // --- UPDATE ANIMATION STATE/POSITION (before collision check for new position) ---
+        if (isJugglingActive) {
+            stickFigureX += stickFigureSpeed;
+            stickFigureFrame = (stickFigureFrame + 1) % 2;
+        } else {
+            stickFigureFrame = 0;
+        }
+        if (isJugglingActive && (stickFigureX - stickFigureWidth / 2 > tft.width())) {
+            stickFigureX = 0 - stickFigureWidth / 2;
+        }
+        // Current (new) stick figure position
+        int16_t currentStickFigureX_center = stickFigureX;
+        int16_t currentStickFigureY_feet = stickFigureY;
+
+
+        // --- COLLISION DETECTION ---
+        bool should_redraw_sign_this_frame = false;
+        if (!isProbablyNight && g_signDimensionsValid) {
+            // --- Calculate comprehensive bounding box for NEW animation frame ---
+            int16_t sf_body_new_x = currentStickFigureX_center - stickFigureWidth / 2 - 2;
+            int16_t sf_body_new_y = currentStickFigureY_feet - stickFigureHeight - 2;
+            int16_t sf_body_w = stickFigureWidth + 4;
+            int16_t sf_body_h = stickFigureHeight + 4;
+
+            int16_t anim_new_x = sf_body_new_x;
+            int16_t anim_new_y = sf_body_new_y;
+            int16_t anim_new_w = sf_body_w;
+            int16_t anim_new_h = sf_body_h;
+
+            if (isJugglingActive) { // Expand bounding box for juggling balls
+                int16_t shoulderY_new = (currentStickFigureY_feet - legLength - bodyLength) + bodyLength / 4;
+                int16_t jugglePeakY_new = shoulderY_new - headRadius * 2 - 20;
+                int16_t sf_balls_new_x = currentStickFigureX_center - armLength - ballRadius - 10;
+                int16_t sf_balls_new_y = jugglePeakY_new - ballRadius - JUGGLE_ARC_HEIGHT - 10;
+                int16_t sf_balls_new_w = (2 * armLength) + (2 * ballRadius) + 20;
+                int16_t ballClearZone_BottomY_new = shoulderY_new + (armLength / 2) + ballRadius + 10;
+                int16_t sf_balls_new_h = ballClearZone_BottomY_new - sf_balls_new_y;
+
+                int16_t combined_x1 = min(sf_body_new_x, sf_balls_new_x);
+                int16_t combined_y1 = min(sf_body_new_y, sf_balls_new_y);
+                int16_t combined_x2 = max(sf_body_new_x + sf_body_w, sf_balls_new_x + sf_balls_new_w);
+                int16_t combined_y2 = max(sf_body_new_y + sf_body_h, sf_balls_new_y + sf_balls_new_h);
+                anim_new_x = combined_x1;
+                anim_new_y = combined_y1;
+                anim_new_w = combined_x2 - combined_x1;
+                anim_new_h = combined_y2 - combined_y1;
+            }
+
+            // --- Calculate comprehensive bounding box for PREVIOUS animation frame ---
+            int16_t sf_body_prev_x = prevStickFigureX_center - stickFigureWidth / 2 - 2;
+            int16_t sf_body_prev_y = prevStickFigureY_feet - stickFigureHeight - 2;
+            // sf_body_w and sf_body_h are the same as for new
+
+            int16_t anim_prev_x = sf_body_prev_x;
+            int16_t anim_prev_y = sf_body_prev_y;
+            int16_t anim_prev_w = sf_body_w;
+            int16_t anim_prev_h = sf_body_h;
+
+            if (prevFrameWasJuggling) { // Expand bounding box for previous juggling balls
+                int16_t shoulderY_prev = (prevStickFigureY_feet - legLength - bodyLength) + bodyLength / 4;
+                int16_t jugglePeakY_prev = shoulderY_prev - headRadius * 2 - 20;
+                int16_t sf_balls_prev_x = prevStickFigureX_center - armLength - ballRadius - 10;
+                int16_t sf_balls_prev_y = jugglePeakY_prev - ballRadius - JUGGLE_ARC_HEIGHT - 10;
+                int16_t sf_balls_prev_w = (2 * armLength) + (2 * ballRadius) + 20;
+                int16_t ballClearZone_BottomY_prev = shoulderY_prev + (armLength / 2) + ballRadius + 10;
+                int16_t sf_balls_prev_h = ballClearZone_BottomY_prev - sf_balls_prev_y;
+
+                int16_t combined_x1 = min(sf_body_prev_x, sf_balls_prev_x);
+                int16_t combined_y1 = min(sf_body_prev_y, sf_balls_prev_y);
+                int16_t combined_x2 = max(sf_body_prev_x + sf_body_w, sf_balls_prev_x + sf_balls_prev_w);
+                int16_t combined_y2 = max(sf_body_prev_y + sf_body_h, sf_balls_prev_y + sf_balls_prev_h);
+                anim_prev_x = combined_x1;
+                anim_prev_y = combined_y1;
+                anim_prev_w = combined_x2 - combined_x1;
+                anim_prev_h = combined_y2 - combined_y1;
+            }
+
+            // Check overlap with the comprehensive animation bounding boxes
+            bool new_anim_overlaps_sign_panel = checkRectOverlap(anim_new_x, anim_new_y, anim_new_w, anim_new_h, g_signRectX, g_signRectY, g_signWidth, g_signHeight);
+            bool new_anim_overlaps_pole = checkRectOverlap(anim_new_x, anim_new_y, anim_new_w, anim_new_h, g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight);
+            bool current_anim_full_overlaps = new_anim_overlaps_sign_panel || new_anim_overlaps_pole;
+
+            bool prev_anim_overlaps_sign_panel = checkRectOverlap(anim_prev_x, anim_prev_y, anim_prev_w, anim_prev_h, g_signRectX, g_signRectY, g_signWidth, g_signHeight);
+            bool prev_anim_overlaps_pole = checkRectOverlap(anim_prev_x, anim_prev_y, anim_prev_w, anim_prev_h, g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight);
+            bool previous_anim_full_overlapped = prev_anim_overlaps_sign_panel || prev_anim_overlaps_pole;
+
+            if (current_anim_full_overlaps || previous_anim_full_overlapped) {
+                should_redraw_sign_this_frame = true;
+            }
+        }
+
+        // --- 2. REDRAW STATIC BACKGROUND ELEMENTS (like the sign) IF NEEDED ---
+        if (should_redraw_sign_this_frame) {
+            // This function clears its own area (sign + pole, excluding gauge) and redraws the sign.
+            drawEnergyValueText(::selfOutputEnergyTotal_calculated);
+        }
+
+        // --- 4. DRAW CURRENT FRAME OF ANIMATION ---
+        // This is drawn AFTER the sign is potentially redrawn, ensuring correct layering.
+        drawStickFigure(currentStickFigureX_center, currentStickFigureY_feet, stickFigureFrame, STICKMAN_COLOR);
+
+        prevFrameWasJuggling = isJugglingActive; // Update for next frame's clearing logic
+    }
+}
+signed long mainLoopIterationCounter = 0; // Initialize
+
+void loop() {
+    mainLoopIterationCounter++;
+    if (client.connected() && client.available()) { char c = client.read(); Serial.write(c); }
+    unsigned long currentMillis = millis();
+
+    if ( lastConnectionTime == 0 || currentMillis - lastConnectionTime > postingInterval) {
+        bool wasNightBeforeRequest = isProbablyNight;
+        httpRequest();
+        if (isProbablyNight != wasNightBeforeRequest) { currentDaytimeState = ANIM_NONE; }
+    }
+
+    if (isProbablyNight) {
+        if (currentDaytimeState != ANIM_NONE) { currentDaytimeState = ANIM_NONE; }
+        animateNight();
+    } else {
+        DaytimeAnimationState determinedNextState;
+        if ( currentMillis - lastConnectionTime > 0 && currentMillis - lastConnectionTime < 5000){ determinedNextState = ANIM_WAVING; }
+        else { determinedNextState = ANIM_WALKING; }
+
+        if (determinedNextState != currentDaytimeState) {
+            if (currentDaytimeState == ANIM_WALKING) { clearCompleteWalkingAnimationArea(stickFigureX, stickFigureY); }
+            else if (currentDaytimeState == ANIM_WAVING) { clearWavingStickmanArea(stickFigureWaveX, stickFigureWaveY); }
+            currentDaytimeState = determinedNextState;
+        }
+
+        if (currentDaytimeState == ANIM_WALKING) { walk(0); }
+        else if (currentDaytimeState == ANIM_WAVING) { waveAnimation(); }
+    }
+    delay(100);
+}
