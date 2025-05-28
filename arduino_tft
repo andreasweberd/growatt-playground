@@ -70,35 +70,38 @@ const int16_t ballRadius = 2; // Juggling ball radius
 bool isProbablyNight; // Flag to indicate day or night
 // Enum for managing daytime animation states
 enum DaytimeAnimationState {
-    ANIM_NONE,    // No animation active or just switched from night
+    ANIM_NONE, // No animation active or just switched from night
     ANIM_WALKING,
     ANIM_WAVING
 };
+
 static DaytimeAnimationState currentDaytimeState = ANIM_NONE;
 
 // Add these for juggling state:
-static bool isJugglingActive = true;       // Controls if stickman is currently juggling
-static bool prevFrameWasJuggling = true;   // Tracks if the *previous* frame had juggling (for clearing)
-static int mvalue_soc = 100;               // Stores the state of charge value, default to high
+static bool isJugglingActive = true; // Controls if stickman is currently juggling
+static bool prevFrameWasJuggling = true; // Tracks if the *previous* frame had juggling (for clearing)
+static int mvalue_soc = 100; // Stores the state of charge value, default to high
 static float selfOutputEnergyTotal_calculated = 0.0f; // To store calculated energy
 // Global variables to store the sign's bounding box for collision detection
 static int16_t g_signRectX, g_signRectY, g_signWidth, g_signHeight;
 static int16_t g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight;
 static bool g_signDimensionsValid = false; // Flag to indicate if globals hold valid data
 // Constants for the manually drawn Euro symbol
-const int16_t DEFAULT_MANUAL_EURO_WIDTH = 14;   // Increased width
-const int16_t DEFAULT_MANUAL_EURO_HEIGHT = 18;  // Increased height
+const int16_t DEFAULT_MANUAL_EURO_WIDTH = 14; // Increased width
+const int16_t DEFAULT_MANUAL_EURO_HEIGHT = 18; // Increased height
 const int16_t DEFAULT_MANUAL_EURO_THICKNESS = 3; // Increased thickness
 // Star structure
 struct Star {
     int16_t x;
     int16_t y;
-    uint8_t radius;
-    uint16_t color;
+    uint8_t radius; // 0 for pixel, >0 for circle
+    // uint16_t color; // REMOVED - will be derived from brightness
     unsigned long lastTwinkleTime;
-    bool isBright;
+    // bool isBright; // REMOVED
     int twinkleInterval;
+    uint8_t brightness; // ADDED: 0-255
 };
+
 Star stars[NUM_STARS];
 
 // Moon Properties
@@ -107,7 +110,7 @@ int moonX;
 int moonY;
 
 // Ethernet Configuration
-byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 IPAddress ip(192, 168, 178, 37); // Static IP if DHCP fails
 IPAddress myDns(192, 168, 178, 1);
 EthernetClient client;
@@ -121,13 +124,13 @@ int stickFigureY;
 int stickFigureFrame = 0;
 unsigned long lastFrameTime = 0;
 const int animationInterval = 500; // Milliseconds between walk frames
-const int stickFigureSpeed = 2;   // Pixels to move per animation step
+const int stickFigureSpeed = 2; // Pixels to move per animation step
 
 // Stick figure dimensions (used for drawing and clearing)
 const int headRadius = 3 * 2; // Reduced
 const int bodyLength = 8 * 2; // Reduced
-const int armLength = 5 * 2;  // Reduced
-const int legLength = 6 * 2;  // Reduced
+const int armLength = 5 * 2; // Reduced
+const int legLength = 6 * 2; // Reduced
 const int stickFigureHeight = headRadius * 2 + bodyLength + legLength;
 const int stickFigureWidth = legLength * 2; // Approximate width for clearing
 
@@ -144,43 +147,267 @@ const int numWaveFrames = 2; // Number of frames in the wave animation (e.g., ar
 int msgNum = 1; // Current message line number
 const int SCREEN_PRINT_BASE_Y = 5; // Base Y for first message line
 const int SCREEN_PRINT_LINE_HEIGHT = 10; // Height of each message line
-const int SCREEN_PRINT_BASE_X = 2;     // Base X for messages
+const int SCREEN_PRINT_BASE_X = 2; // Base X for messages
 
+// Bird Animation Settings
+const uint16_t BIRD_COLOR = BLACK;
+const int16_t BIRD_WING_SPAN = 4; // Horizontal extent of one wing from the body
+const int16_t BIRD_WING_LIFT = 2; // Vertical movement of wing tip
+const unsigned long BIRD_FLAP_INTERVAL = 180; // Milliseconds between wing flaps
+const unsigned long BIRD_MOVE_INTERVAL = 120; // Milliseconds between position updates
+const float BIRD_SPEED = 0.8f; // Pixels per move update (can be float for smoother dx/dy)
+const int16_t BIRD_ROAM_X_MIN = 10;
+const int16_t BIRD_ROAM_Y_MIN = 10;
+const int16_t BIRD_ROAM_X_MAX = 120; // Keep it in the top-left-ish area
+const int16_t BIRD_ROAM_Y_MAX = 70; // Keep it in the top-left-ish area
+
+const unsigned long BIRD_MIN_ONSCREEN_DURATION = 8000; // Min time bird stays visible
+const unsigned long BIRD_MAX_ONSCREEN_DURATION = 20000; // Max time bird stays visible
+const unsigned long BIRD_MIN_OFFSCREEN_DURATION = 5000; // Min time bird stays hidden
+const unsigned long BIRD_MAX_OFFSCREEN_DURATION = 15000; // Max time bird stays hidden
+// Moon Phase Animation
+static float currentMoonPhaseProgress = 0.0f; // 0.0 = full, 1.0 = new/crescent
+static unsigned long moonPhaseCycleStartTime = 0; // When the current 8-hour cycle began
+// 8 hours in milliseconds (8 * 60 minutes * 60 seconds * 1000 milliseconds)
+const unsigned long MOON_FULL_CYCLE_DURATION_MS = 8UL * 60UL * 60UL * 1000UL;
+// Moon Properties
+const float MOON_SHADOW_MAX_Y_TILT_FACTOR = 0.33f; // Max Y offset as a factor of moonRadius (e.g., 15%)
+// Bird State Structure
+struct BirdState {
+    int16_t x, y;
+    int16_t prev_x, prev_y; // For clearing
+    uint8_t wing_frame; // 0 or 1
+    bool is_active; // Is the bird currently on screen and animating
+    bool is_leaving; // Is the bird currently flying off-screen
+
+    unsigned long last_flap_time;
+    unsigned long last_move_time;
+
+    float current_x_f, current_y_f; // Floating point for smoother movement accumulation
+
+    int16_t target_x;
+    int16_t target_y;
+
+    unsigned long next_event_time; // Time for next appearance or disappearance
+};
+
+BirdState game_bird; // Global instance for our bird
 // Function Prototypes
 void setupNightScene();
+
 void drawMoon();
+
 void drawStickManSleeping();
+
 void updateAndDrawStars(unsigned long currentTime);
+
 void initTft();
+
 void initNetwork();
+
 int getIntValue(const String &jsonStringObj, const char *targetKey);
+
 float getFloatValue(const String &jsonStringObj, const char *targetKey);
+
 void drawStickFigure(int16_t x, int16_t y, uint8_t frame, uint16_t color);
-void fillRectExclude(int16_t r1x, int16_t r1y, int16_t r1w, int16_t r1h, int16_t r2x, int16_t r2y, int16_t r2w, int16_t r2h, uint16_t color);
+
+void fillRectExclude(int16_t r1x, int16_t r1y, int16_t r1w, int16_t r1h, int16_t r2x, int16_t r2y, int16_t r2w,
+                     int16_t r2h, uint16_t color);
+
 void drawSun(int glow);
+
 void drawEnergyValueText(float energyValue); // RENAMED Prototype
-void drawGauge(const int value, const int value2, const int centerX, const int centerY, const int radius, const uint16_t outlineColor, const uint16_t fillColor, uint16_t textColor);
+void drawGauge(const int value, const int value2, const int centerX, const int centerY, const int radius,
+               const uint16_t outlineColor, const uint16_t fillColor, uint16_t textColor);
+
 void httpRequest();
+
 void walk(unsigned long wait);
+
 void animateNight();
+
 void showmsgXY(int x, int y_base, int sz, const GFXfont *f, const char *msg);
+
 void print(const char *text);
+
 void println(const char *text);
+
 void println(String text);
-void println(const IPAddress& ip_addr);
+
+void println(const IPAddress &ip_addr);
+
 void drawStickFigureWave(int16_t x, int16_t y, uint8_t frame, uint16_t color);
+
 void waveAnimation();
+
 void clearWavingStickmanArea(int16_t x_wave, int16_t y_wave);
+
 void clearCompleteWalkingAnimationArea(int16_t x_walk, int16_t y_walk);
 
-void drawManualEuroSymbol(int16_t x_tl, int16_t y_tl, int16_t w_total, int16_t h_total, int16_t thickness, uint16_t color) {
+void update_and_draw_bird();
+
+void update_and_draw_bird() {
+    unsigned long current_time = millis();
+
+    if (!game_bird.is_active) {
+        if (current_time >= game_bird.next_event_time) {
+            // Time to appear
+            game_bird.is_active = true;
+            game_bird.is_leaving = false;
+
+            // Start bird at a random horizontal position, slightly above its roaming area, flying in
+            game_bird.current_x_f = random(BIRD_ROAM_X_MIN, BIRD_ROAM_X_MAX + 1);
+            game_bird.current_y_f = BIRD_ROAM_Y_MIN - (BIRD_WING_LIFT + BIRD_WING_SPAN + 5); // Start off-screen top
+            game_bird.x = round(game_bird.current_x_f);
+            game_bird.y = round(game_bird.current_y_f);
+
+            // Set initial target inside the roaming area
+            game_bird.target_x = random(BIRD_ROAM_X_MIN, BIRD_ROAM_X_MAX + 1);
+            game_bird.target_y = random(BIRD_ROAM_Y_MIN, BIRD_ROAM_Y_MAX + 1);
+
+            game_bird.prev_x = game_bird.x; // Initialize prev_x/y for first clear
+            game_bird.prev_y = game_bird.y;
+
+            game_bird.wing_frame = 0;
+            game_bird.last_flap_time = current_time;
+            game_bird.last_move_time = current_time;
+            // Schedule disappearance
+            game_bird.next_event_time = current_time + random(BIRD_MIN_ONSCREEN_DURATION, BIRD_MAX_ONSCREEN_DURATION);
+        }
+        return; // Bird not active, do nothing more this frame
+    }
+
+    // --- Bird is active ---
+
+    // 1. Clear previous bird position
+    int16_t clear_w = (BIRD_WING_SPAN * 2) + 1;
+    int16_t clear_h = (BIRD_WING_LIFT * 2) + 1;
+    int16_t clear_x = game_bird.prev_x - BIRD_WING_SPAN;
+    int16_t clear_y = game_bird.prev_y - BIRD_WING_LIFT;
+    int16_t sky_limit_y = tft.height() - FIELD_HEIGHT;
+
+    if (clear_y < sky_limit_y) {
+        int16_t actual_clear_h = clear_h;
+        if (clear_y + clear_h > sky_limit_y) {
+            actual_clear_h = sky_limit_y - clear_y;
+        }
+        if (actual_clear_h > 0) {
+            tft.fillRect(clear_x, clear_y, clear_w, actual_clear_h, DAY_BG_COLOR);
+        }
+    }
+
+    // 2. Check if it's time to start leaving
+    if (!game_bird.is_leaving && current_time >= game_bird.next_event_time) {
+        game_bird.is_leaving = true;
+        game_bird.target_x = BIRD_ROAM_X_MIN - (BIRD_WING_SPAN + 20); // Fly off far left
+        game_bird.target_y = BIRD_ROAM_Y_MIN - (BIRD_WING_LIFT + 20); // Fly off far top
+    }
+
+    // 3. Update Wing Flapping
+    if (current_time - game_bird.last_flap_time > BIRD_FLAP_INTERVAL) {
+        game_bird.wing_frame = 1 - game_bird.wing_frame;
+        game_bird.last_flap_time = current_time;
+    }
+
+    // 4. Update Movement
+    if (current_time - game_bird.last_move_time > BIRD_MOVE_INTERVAL) {
+        // Probabilistic new target if not leaving
+        if (!game_bird.is_leaving && random(100) < 3) {
+            // 3% chance each move update to pick a new target
+            float dist_to_current_target_sq = pow((float) game_bird.target_x - game_bird.current_x_f, 2) +
+                                              pow((float) game_bird.target_y - game_bird.current_y_f, 2);
+            // Only change target if not already very close (e.g., further than 8 pixels away)
+            if (dist_to_current_target_sq > pow(BIRD_SPEED * 10.0f, 2)) {
+                game_bird.target_x = random(BIRD_ROAM_X_MIN, BIRD_ROAM_X_MAX + 1);
+                game_bird.target_y = random(BIRD_ROAM_Y_MIN, BIRD_ROAM_Y_MAX + 1);
+            }
+        }
+
+        float diff_x = (float) game_bird.target_x - game_bird.current_x_f;
+        float diff_y = (float) game_bird.target_y - game_bird.current_y_f;
+        float distance = sqrt(diff_x * diff_x + diff_y * diff_y);
+
+        if (distance < BIRD_SPEED * 1.5f) {
+            // Reached target or very close
+            if (game_bird.is_leaving) {
+                game_bird.is_active = false; // Deactivate
+                game_bird.next_event_time = current_time + random(BIRD_MIN_OFFSCREEN_DURATION,
+                                                                  BIRD_MAX_OFFSCREEN_DURATION);
+                return; // Exit immediately after deactivating
+            } else {
+                // Pick new target within roam bounds
+                game_bird.target_x = random(BIRD_ROAM_X_MIN, BIRD_ROAM_X_MAX + 1);
+                game_bird.target_y = random(BIRD_ROAM_Y_MIN, BIRD_ROAM_Y_MAX + 1);
+                // Recalculate diff and distance for the new target for this move step
+                diff_x = (float) game_bird.target_x - game_bird.current_x_f;
+                diff_y = (float) game_bird.target_y - game_bird.current_y_f;
+                distance = sqrt(diff_x * diff_x + diff_y * diff_y);
+            }
+        }
+
+        if (distance > 0.001f) {
+            // Avoid division by zero if already at target
+            float dir_x = diff_x / distance; // Normalized direction to target
+            float dir_y = diff_y / distance;
+
+            // Add random perturbation to the direction vector for a wobbly path
+            const float perturbation_strength = 0.4f; // Adjust for more/less wobble (0.0 to ~1.0)
+            // Generate a random small vector to add to the direction
+            float perturb_vec_x = (random(-100, 101) / 100.0f) * perturbation_strength;
+            float perturb_vec_y = (random(-100, 101) / 100.0f) * perturbation_strength;
+
+            float new_dir_x = dir_x + perturb_vec_x;
+            float new_dir_y = dir_y + perturb_vec_y;
+
+            // Re-normalize the new (perturbed) direction vector
+            float new_dir_len = sqrt(new_dir_x * new_dir_x + new_dir_y * new_dir_y);
+            if (new_dir_len > 0.001f) {
+                new_dir_x /= new_dir_len;
+                new_dir_y /= new_dir_len;
+            } else {
+                // If perturbation exactly cancelled out direction, revert to original
+                new_dir_x = dir_x;
+                new_dir_y = dir_y;
+            }
+
+            game_bird.current_x_f += new_dir_x * BIRD_SPEED;
+            game_bird.current_y_f += new_dir_y * BIRD_SPEED;
+        }
+
+        game_bird.x = round(game_bird.current_x_f);
+        game_bird.y = round(game_bird.current_y_f);
+        game_bird.last_move_time = current_time;
+    }
+
+    // 5. Draw bird at new position
+    if (game_bird.y >= 0 && game_bird.y < sky_limit_y - BIRD_WING_LIFT) {
+        tft.drawPixel(game_bird.x, game_bird.y, BIRD_COLOR); // Body
+        if (game_bird.wing_frame == 0) {
+            // Wings "up"
+            tft.drawLine(game_bird.x, game_bird.y, game_bird.x - BIRD_WING_SPAN, game_bird.y - BIRD_WING_LIFT,
+                         BIRD_COLOR);
+            tft.drawLine(game_bird.x, game_bird.y, game_bird.x + BIRD_WING_SPAN, game_bird.y - BIRD_WING_LIFT,
+                         BIRD_COLOR);
+        } else {
+            // Wings "down/level"
+            tft.drawLine(game_bird.x, game_bird.y, game_bird.x - BIRD_WING_SPAN, game_bird.y + 1, BIRD_COLOR);
+            tft.drawLine(game_bird.x, game_bird.y, game_bird.x + BIRD_WING_SPAN, game_bird.y + 1, BIRD_COLOR);
+        }
+    }
+
+    game_bird.prev_x = game_bird.x;
+    game_bird.prev_y = game_bird.y;
+}
+
+void drawManualEuroSymbol(int16_t x_tl, int16_t y_tl, int16_t w_total, int16_t h_total, int16_t thickness,
+                          uint16_t color) {
     if (thickness < 1) thickness = 1;
     // Ensure dimensions are large enough for the symbol to be drawn meaningfully
     if (h_total < thickness * 2 + 3 || w_total < thickness * 2 + 3) return; // Adjusted minimum size
 
     // Radii for the outer edge of the 'C' (ellipse)
-    float outer_radius_x = (float)w_total / 2.0f;
-    float outer_radius_y = (float)h_total / 2.0f;
+    float outer_radius_x = (float) w_total / 2.0f;
+    float outer_radius_y = (float) h_total / 2.0f;
 
     // Radii for the inner edge of the 'C' (ellipse)
     float inner_radius_x = outer_radius_x - thickness;
@@ -197,7 +424,7 @@ void drawManualEuroSymbol(int16_t x_tl, int16_t y_tl, int16_t w_total, int16_t h
 
     const int num_segments = 10; // Increased for a smoother elliptical curve
     float start_angle_rad = PI * 0.20f; // Opening on the right (approx 36 degrees)
-    float end_angle_rad = PI * 1.80f;   // (approx 324 degrees)
+    float end_angle_rad = PI * 1.80f; // (approx 324 degrees)
 
     float angle_step_rad = (end_angle_rad - start_angle_rad) / num_segments;
 
@@ -217,8 +444,10 @@ void drawManualEuroSymbol(int16_t x_tl, int16_t y_tl, int16_t w_total, int16_t h
             tft.fillTriangle(prev_ox, prev_oy, ox, oy, prev_ix, prev_iy, color);
             tft.fillTriangle(ox, oy, prev_ix, prev_iy, ix, iy, color);
         }
-        prev_ox = ox; prev_oy = oy;
-        prev_ix = ix; prev_iy = iy;
+        prev_ox = ox;
+        prev_oy = oy;
+        prev_ix = ix;
+        prev_iy = iy;
     }
 
     // --- Draw the two horizontal lines ---
@@ -241,11 +470,11 @@ void drawManualEuroSymbol(int16_t x_tl, int16_t y_tl, int16_t w_total, int16_t h
         // If they would overlap or be too close, draw a single centered line
         int16_t single_line_y = round(center_y_arc - thickness / 2.0f);
         // Ensure this single line is still somewhat visible
-        if (line_len >=1 && thickness >=1) {
-             tft.fillRect(round(line_start_x), single_line_y, round(line_len), thickness, color);
+        if (line_len >= 1 && thickness >= 1) {
+            tft.fillRect(round(line_start_x), single_line_y, round(line_len), thickness, color);
         }
     } else {
-        if (line_len >=1 && thickness >=1) {
+        if (line_len >= 1 && thickness >= 1) {
             tft.fillRect(round(line_start_x), y1_line_top, round(line_len), thickness, color);
             tft.fillRect(round(line_start_x), y2_line_top, round(line_len), thickness, color);
         }
@@ -265,10 +494,14 @@ float getFloatValue(const String &jsonStringObj, const char *targetKey) {
             valueString.trim();
             return valueString.toFloat();
         } else {
-            print("Error: Could not find float value for key '"); print(targetKey); println("'.");
+            print("Error: Could not find float value for key '");
+            print(targetKey);
+            println("'.");
         }
     } else {
-        print("Error: Key '"); print(targetKey); println("' not found for float.");
+        print("Error: Key '");
+        print(targetKey);
+        println("' not found for float.");
     }
     return 0.0f;
 }
@@ -305,14 +538,16 @@ void clearWavingStickmanArea(int16_t x_wave, int16_t y_wave) {
         int16_t skyClearStartY = clearStickManY_Top;
         int16_t skyClearHeight = min(clearStickManH, fieldTopPixelVal - skyClearStartY);
         if (skyClearHeight > 0) {
-            fillRectExclude(clearStickManX, skyClearStartY, clearStickManW, skyClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+            fillRectExclude(clearStickManX, skyClearStartY, clearStickManW, skyClearHeight, gaugeBoxX, gaugeBoxY,
+                            gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
         }
     }
     int16_t fieldClearStartY = max(clearStickManY_Top, fieldTopPixelVal);
     if (fieldClearStartY < clearStickManY_Top + clearStickManH) {
         int16_t fieldClearHeight = (clearStickManY_Top + clearStickManH) - fieldClearStartY;
         if (fieldClearHeight > 0) {
-            fillRectExclude(clearStickManX, fieldClearStartY, clearStickManW, fieldClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+            fillRectExclude(clearStickManX, fieldClearStartY, clearStickManW, fieldClearHeight, gaugeBoxX, gaugeBoxY,
+                            gaugeBoxW, gaugeBoxH, GREEN);
         }
     }
 }
@@ -332,14 +567,16 @@ void clearCompleteWalkingAnimationArea(int16_t x_walk, int16_t y_walk) {
         int16_t skyClearStartY = clearStickManY_Top;
         int16_t skyClearHeight = min(clearStickManH, fieldTopPixelVal - skyClearStartY);
         if (skyClearHeight > 0) {
-            fillRectExclude(clearStickManX, skyClearStartY, clearStickManW, skyClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+            fillRectExclude(clearStickManX, skyClearStartY, clearStickManW, skyClearHeight, gaugeBoxX, gaugeBoxY,
+                            gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
         }
     }
     int16_t fieldClearStartY = max(clearStickManY_Top, fieldTopPixelVal);
     if (fieldClearStartY < clearStickManY_Top + clearStickManH) {
         int16_t fieldClearHeight = (clearStickManY_Top + clearStickManH) - fieldClearStartY;
         if (fieldClearHeight > 0) {
-            fillRectExclude(clearStickManX, fieldClearStartY, clearStickManW, fieldClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+            fillRectExclude(clearStickManX, fieldClearStartY, clearStickManW, fieldClearHeight, gaugeBoxX, gaugeBoxY,
+                            gaugeBoxW, gaugeBoxH, GREEN);
         }
     }
     if (isJugglingActive) {
@@ -353,12 +590,15 @@ void clearCompleteWalkingAnimationArea(int16_t x_walk, int16_t y_walk) {
         if (ballClearZoneH > 0) {
             if (ballClearZoneY < fieldTopPixelVal) {
                 int16_t skyBallsClearH = min(ballClearZoneH, fieldTopPixelVal - ballClearZoneY);
-                if (skyBallsClearH > 0) fillRectExclude(ballClearZoneX, ballClearZoneY, ballClearZoneW, skyBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+                if (skyBallsClearH > 0) fillRectExclude(ballClearZoneX, ballClearZoneY, ballClearZoneW, skyBallsClearH,
+                                                        gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
             }
             int16_t fieldBallsClearY_juggle = max(ballClearZoneY, fieldTopPixelVal);
             if (fieldBallsClearY_juggle < ballClearZoneY + ballClearZoneH) {
                 int16_t fieldBallsClearH = (ballClearZoneY + ballClearZoneH) - fieldBallsClearY_juggle;
-                if (fieldBallsClearH > 0) fillRectExclude(ballClearZoneX, fieldBallsClearY_juggle, ballClearZoneW, fieldBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+                if (fieldBallsClearH > 0) fillRectExclude(ballClearZoneX, fieldBallsClearY_juggle, ballClearZoneW,
+                                                          fieldBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH,
+                                                          GREEN);
             }
         }
     } else {
@@ -375,33 +615,69 @@ void clearCompleteWalkingAnimationArea(int16_t x_walk, int16_t y_walk) {
 void setupNightScene() {
     moonX = tft.width() - moonRadius - 10;
     moonY = moonRadius + 10;
-    randomSeed(analogRead(A0));
+    randomSeed(analogRead(A0)); // Good to seed random
+
+    // Initialize stars
     for (int i = 0; i < NUM_STARS; i++) {
         stars[i].x = random(tft.width());
-        stars[i].y = random(tft.height() - (isProbablyNight ? 0 : FIELD_HEIGHT));
-        stars[i].radius = random(2);
-        stars[i].isBright = random(2);
-        stars[i].color = stars[i].isBright ? STAR_BRIGHT_COLOR : STAR_DIM_COLOR;
-        stars[i].twinkleInterval = TWINKLE_BASE_INTERVAL + random(200);
-        stars[i].lastTwinkleTime = millis() + random(stars[i].twinkleInterval);
+        stars[i].y = random(tft.height() - FIELD_HEIGHT - 10); // Keep stars above field
+        stars[i].radius = 0; // Default to pixel-sized stars
+
+        // Initialize brightness
+        stars[i].brightness = random(50, 200);
+        // Initial brightness (e.g., 50-199 to avoid pure black or full white initially)
+
+        stars[i].lastTwinkleTime = millis() + random(0, 5000); // Stagger initial twinkles
+        stars[i].twinkleInterval = random(2000, 7000); // Longer interval to reduce flickering
     }
 }
 
-void drawMoon() {
-    int16_t moonBoundingBoxX = moonX - moonRadius - 1;
-    int16_t moonBoundingBoxY = moonY - moonRadius - 1;
-    int16_t moonBoundingBoxW = moonRadius * 2 + 2;
-    int16_t moonBoundingBoxH = moonRadius * 2 + 2;
+   void drawMoon() {
+    // Calculate the maximum vertical offset for the shadow tilt
+    float max_y_offset_for_tilt = moonRadius * MOON_SHADOW_MAX_Y_TILT_FACTOR;
+
+    // Adjust bounding box for clearing to account for the shadow's Y tilt
+    // The shadow circle has radius moonRadius + 1.
+    // Its center can be moonY +/- max_y_offset_for_tilt.
+    // So, the shadow can extend vertically from:
+    // moonY - max_y_offset_for_tilt - (moonRadius + 1) to
+    // moonY + max_y_offset_for_tilt + (moonRadius + 1)
+    int16_t effective_clear_radius_y = ceil(moonRadius + 1 + max_y_offset_for_tilt);
+    int16_t moonBoundingBoxX = moonX - (moonRadius + 2); // X clearing is less affected by Y tilt
+    int16_t moonBoundingBoxY = moonY - effective_clear_radius_y;
+    int16_t moonBoundingBoxW = (moonRadius + 2) * 2;
+    int16_t moonBoundingBoxH = effective_clear_radius_y * 2;
+
     tft.fillRect(moonBoundingBoxX, moonBoundingBoxY, moonBoundingBoxW, moonBoundingBoxH, NIGHT_BG_COLOR);
+
+    // 1. Draw the full, lit moon disc
     tft.fillCircle(moonX, moonY, moonRadius, MOON_COLOR);
+
+    // 2. Draw the face elements on the lit disc
+    // Eyes
     tft.fillCircle(moonX - moonRadius / 3, moonY - moonRadius / 5, 2, MOON_FACE_COLOR);
     tft.fillCircle(moonX + moonRadius / 3, moonY - moonRadius / 5, 2, MOON_FACE_COLOR);
+    // Smile
     int smileY = moonY + moonRadius / 4;
     int smileOffsetX = moonRadius / 3;
     int smileCurve = moonRadius / 8;
     tft.drawLine(moonX - smileOffsetX, smileY, moonX - smileOffsetX / 2, smileY + smileCurve, MOON_FACE_COLOR);
     tft.drawLine(moonX - smileOffsetX / 2, smileY + smileCurve, moonX + smileOffsetX / 2, smileY + smileCurve, MOON_FACE_COLOR);
     tft.drawLine(moonX + smileOffsetX / 2, smileY + smileCurve, moonX + smileOffsetX, smileY, MOON_FACE_COLOR);
+
+    // 3. Draw the shadow overlay if not a perfectly full moon
+    if (currentMoonPhaseProgress > 0.001f) { // Avoid drawing for full moon (or very close to it)
+        // Calculate the X offset of the shadow circle.
+        float shadowCenterX = (moonX + 2 * moonRadius + 1) - ((4 * moonRadius + 2) * currentMoonPhaseProgress);
+
+        // Calculate the Y offset of the shadow circle for a tilted effect
+        // Shadow starts high (progress=0) and moves lower (progress=1)
+        // This makes the light source appear to be from the bottom-left.
+        float shadowCenterY = moonY - max_y_offset_for_tilt + (2.0f * max_y_offset_for_tilt * currentMoonPhaseProgress);
+
+        // The shadow circle should be slightly larger to ensure good coverage
+        tft.fillCircle(round(shadowCenterX), round(shadowCenterY), moonRadius + 1, NIGHT_BG_COLOR);
+    }
 }
 
 void waveAnimation() {
@@ -410,7 +686,7 @@ void waveAnimation() {
         lastWaveFrameTime = currentTime;
 
         int16_t prevStickFigureX_center = stickFigureWaveX; // Assuming stickFigureWaveX is center
-        int16_t prevStickFigureY_feet = stickFigureWaveY;   // Assuming stickFigureWaveY is feet
+        int16_t prevStickFigureY_feet = stickFigureWaveY; // Assuming stickFigureWaveY is feet
 
         // --- 1. CLEAR PREVIOUS FRAME ARTIFACTS ---
         // (Using the existing clearing logic from your waveAnimation)
@@ -433,8 +709,8 @@ void waveAnimation() {
             int16_t skyClearStartY = clearStickManY_Top_prev;
             int16_t skyClearHeight = min(clearStickManH_prev, fieldTopPixelVal - skyClearStartY);
             if (skyClearHeight > 0) {
-                 fillRectExclude(clearStickManX_prev, skyClearStartY, clearStickManW_prev, skyClearHeight,
-                                 gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+                fillRectExclude(clearStickManX_prev, skyClearStartY, clearStickManW_prev, skyClearHeight,
+                                gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
             }
         }
         int16_t fieldClearStartY = max(clearStickManY_Top_prev, fieldTopPixelVal);
@@ -461,8 +737,10 @@ void waveAnimation() {
             int16_t sf_w = stickFigureWidth + 4;
             int16_t sf_h = stickFigureHeight + 4; // Approx.
 
-            bool overlaps_sign_panel = checkRectOverlap(sf_x, sf_y, sf_w, sf_h, g_signRectX, g_signRectY, g_signWidth, g_signHeight);
-            bool overlaps_pole = checkRectOverlap(sf_x, sf_y, sf_w, sf_h, g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight);
+            bool overlaps_sign_panel = checkRectOverlap(sf_x, sf_y, sf_w, sf_h, g_signRectX, g_signRectY, g_signWidth,
+                                                        g_signHeight);
+            bool overlaps_pole = checkRectOverlap(sf_x, sf_y, sf_w, sf_h, g_poleRectX, g_poleRectY, g_poleWidth,
+                                                  g_poleHeight);
 
             if (overlaps_sign_panel || overlaps_pole) {
                 should_redraw_sign_this_frame = true;
@@ -481,6 +759,7 @@ void waveAnimation() {
         drawStickFigureWave(currentStickFigureX_center, currentStickFigureY_feet, waveFrame, STICKMAN_COLOR);
     }
 }
+
 void drawStickFigureWave(int16_t x, int16_t y, uint8_t frame, uint16_t color) {
     float upperArmSegmentRatio = 0.66f, foreArmSegmentRatio = 0.49f;
     int16_t bodyTopY = y - legLength - bodyLength;
@@ -527,20 +806,24 @@ void drawStickFigureWave(int16_t x, int16_t y, uint8_t frame, uint16_t color) {
 
     // Hand position relative to the elbow, based on frame (original logic preserved)
     float hand_dx_factor, hand_dy_factor;
-    if (frame == 0) { // Original: Hand to right and slightly up from elbow
+    if (frame == 0) {
+        // Original: Hand to right and slightly up from elbow
         hand_dx_factor = 0.65f;
         hand_dy_factor = 0.76f;
-    } else { // Original: Hand to right and more up from elbow
+    } else {
+        // Original: Hand to right and more up from elbow
         hand_dx_factor = 0.50f;
         hand_dy_factor = 0.866f;
     }
 
     rightHandX = rightElbowX + round(foreArmActualLength * hand_dx_factor);
-    rightHandY = rightElbowY - round(foreArmActualLength * hand_dy_factor); // Original: Positive dy_factor moves hand UP
+    rightHandY = rightElbowY - round(foreArmActualLength * hand_dy_factor);
+    // Original: Positive dy_factor moves hand UP
 
     tft.drawLine(x, shoulderY, rightElbowX, rightElbowY, color);
     tft.drawLine(rightElbowX, rightElbowY, rightHandX, rightHandY, color);
 }
+
 void drawStickManSleeping() {
     int localHeadRadius = 8;
     int torsoSittingHeight = 28;
@@ -551,30 +834,45 @@ void drawStickManSleeping() {
     int hipBaseY = groundLevel;
     int neckY = hipBaseY - torsoSittingHeight;
     int hY = neckY - localHeadRadius;
-    int hX = localHeadRadius + 10;
+
+    // --- MODIFIED LINE ---
+    int hX = localHeadRadius; // Head's center X, so its left edge is at 0
+    // --- END MODIFIED LINE ---
+
     int neckX = hX;
-    int hipX = hX + 5;
-    tft.fillRect(hX - localHeadRadius - 5, hY - localHeadRadius - 10, legSegmentLengthLocal * 2 + 20, localHeadRadius * 2 + torsoSittingHeight + legSegmentLengthLocal + 10, NIGHT_BG_COLOR);
+    int hipX = hX + 5; // Body will be slightly to the right of the head's center
+
+    // Clearing rectangle calculation will adjust based on the new hX
+    // The existing fillRect will clip negative start coordinates to 0, which is fine.
+    tft.fillRect(hX - localHeadRadius - 5, hY - localHeadRadius - 10, legSegmentLengthLocal * 2 + 20,
+                 localHeadRadius * 2 + torsoSittingHeight + legSegmentLengthLocal + 10, NIGHT_BG_COLOR);
+
     tft.fillCircle(hX, hY, localHeadRadius, STICKMAN_COLOR_NIGHT);
     tft.drawLine(neckX, neckY, hipX, hipBaseY, STICKMAN_COLOR_NIGHT);
+
     int kneeX = hipX + legSegmentLengthLocal;
     int kneeY = hipBaseY - 12;
     tft.drawLine(hipX, hipBaseY, kneeX, kneeY, STICKMAN_COLOR_NIGHT);
+
     int footX = kneeX + (legSegmentLengthLocal / 2) + 5;
     int footY = hipBaseY;
     tft.drawLine(kneeX, kneeY, footX, footY, STICKMAN_COLOR_NIGHT);
+
     int shoulderY = neckY + 4;
     int shoulderX_right = neckX + 2;
     int elbow1X = shoulderX_right + armSegmentLengthLocal - 3;
     int elbow1Y = shoulderY + armSegmentLengthLocal - 5;
     tft.drawLine(shoulderX_right, shoulderY, elbow1X, elbow1Y, STICKMAN_COLOR_NIGHT);
+
     int hand1X = kneeX - 4;
     int hand1Y = kneeY;
     tft.drawLine(elbow1X, elbow1Y, hand1X, hand1Y, STICKMAN_COLOR_NIGHT);
-    int shoulderX_left = neckX;
+
+    int shoulderX_left = neckX; // This arm is behind/under
     int elbowL_X = shoulderX_left;
     int elbowL_Y = shoulderY + armSegmentLengthLocal;
     tft.drawLine(shoulderX_left, shoulderY, elbowL_X, elbowL_Y, STICKMAN_COLOR_NIGHT);
+
     int handL_X = shoulderX_left + 2;
     int handL_Y = hipBaseY;
     tft.drawLine(elbowL_X, elbowL_Y, handL_X, handL_Y, STICKMAN_COLOR_NIGHT);
@@ -583,21 +881,40 @@ void drawStickManSleeping() {
 void updateAndDrawStars(unsigned long currentTime) {
     for (int i = 0; i < NUM_STARS; i++) {
         uint16_t starBgColor = NIGHT_BG_COLOR;
-        if (!isProbablyNight && stars[i].y < tft.height() - FIELD_HEIGHT) {
-             starBgColor = DAY_BG_COLOR;
-        } else if (!isProbablyNight && stars[i].y >= tft.height() - FIELD_HEIGHT) {
-            starBgColor = GREEN;
-        }
-        if (stars[i].radius == 0) { tft.drawPixel(stars[i].x, stars[i].y, starBgColor); }
-        else { tft.fillCircle(stars[i].x, stars[i].y, stars[i].radius, starBgColor); }
-        if (isProbablyNight) {
-            if (currentTime - stars[i].lastTwinkleTime > stars[i].twinkleInterval) {
-                stars[i].isBright = !stars[i].isBright;
-                stars[i].color = stars[i].isBright ? STAR_BRIGHT_COLOR : STAR_DIM_COLOR;
-                stars[i].lastTwinkleTime = currentTime;
+        // Determine background color for clearing based on day/night and position
+        if (!isProbablyNight) {
+            // If it's daytime, stars should be cleared with day/field color
+            if (stars[i].y < tft.height() - FIELD_HEIGHT) {
+                starBgColor = DAY_BG_COLOR; // Sky
+            } else {
+                starBgColor = GREEN; // Field
             }
-            if (stars[i].radius == 0) { tft.drawPixel(stars[i].x, stars[i].y, stars[i].color); }
-            else { tft.fillCircle(stars[i].x, stars[i].y, stars[i].radius, stars[i].color); }
+        }
+
+        // Clear previous star position
+        if (stars[i].radius == 0) {
+            // If star is a pixel
+            tft.drawPixel(stars[i].x, stars[i].y, starBgColor);
+        } else {
+            // If star has a radius
+            tft.fillCircle(stars[i].x, stars[i].y, stars[i].radius, starBgColor);
+        }
+
+        if (isProbablyNight) {
+            // Only draw/twinkle stars if it's night
+            if (currentTime - stars[i].lastTwinkleTime > stars[i].twinkleInterval) {
+                // Twinkle: change brightness and reset timer
+                stars[i].brightness = random(50, 256); // New random brightness (50 to 255)
+                stars[i].lastTwinkleTime = currentTime;
+                stars[i].twinkleInterval = random(2000, 7000); // Reset for next twinkle with longer interval
+            }
+            // Draw current star using its brightness
+            uint16_t currentStarColor = tft.color565(stars[i].brightness, stars[i].brightness, stars[i].brightness);
+            if (stars[i].radius == 0) {
+                tft.drawPixel(stars[i].x, stars[i].y, currentStarColor);
+            } else {
+                tft.fillCircle(stars[i].x, stars[i].y, stars[i].radius, currentStarColor);
+            }
         }
     }
 }
@@ -605,34 +922,73 @@ void updateAndDrawStars(unsigned long currentTime) {
 void showmsgXY(int x, int y_base, int sz, const GFXfont *f, const char *msg) {
     int current_print_y = y_base + (msgNum - 1) * SCREEN_PRINT_LINE_HEIGHT;
     if (current_print_y + SCREEN_PRINT_LINE_HEIGHT > tft.height()) {
-        msgNum = 1; current_print_y = y_base;
+        msgNum = 1;
+        current_print_y = y_base;
     }
     uint16_t messageBgColor = DAY_BG_COLOR;
-    if (isProbablyNight) { messageBgColor = NIGHT_BG_COLOR; }
-    else {
-        if (current_print_y >= (tft.height() - FIELD_HEIGHT) && (current_print_y + SCREEN_PRINT_LINE_HEIGHT) <= tft.height()) { messageBgColor = GREEN; }
-        else if (current_print_y < (tft.height() - FIELD_HEIGHT) && (current_print_y + SCREEN_PRINT_LINE_HEIGHT) > (tft.height() - FIELD_HEIGHT)) { /* Spans sky/field, default to sky for simplicity */ }
+    if (isProbablyNight) { messageBgColor = NIGHT_BG_COLOR; } else {
+        if (current_print_y >= (tft.height() - FIELD_HEIGHT) && (current_print_y + SCREEN_PRINT_LINE_HEIGHT) <= tft.
+            height()) { messageBgColor = GREEN; } else if (
+            current_print_y < (tft.height() - FIELD_HEIGHT) && (current_print_y + SCREEN_PRINT_LINE_HEIGHT) > (
+                tft.height() - FIELD_HEIGHT)) {
+            /* Spans sky/field, default to sky for simplicity */
+        }
     }
     tft.fillRect(0, current_print_y, tft.width(), SCREEN_PRINT_LINE_HEIGHT, messageBgColor);
-    tft.setFont(f); tft.setCursor(x, current_print_y); tft.setTextColor(WHITE); tft.setTextSize(sz); tft.print(msg);
+    tft.setFont(f);
+    tft.setCursor(x, current_print_y);
+    tft.setTextColor(WHITE);
+    tft.setTextSize(sz);
+    tft.print(msg);
     msgNum++;
 }
 
-void print(const char *text) { Serial.print(text); showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text); }
-void println(const char *text) { Serial.println(text); showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text); }
-void println(String text) { Serial.println(text); showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text.c_str()); }
-void println(const IPAddress& ip_addr) { String ipStr = String(ip_addr[0]) + "." + String(ip_addr[1]) + "." + String(ip_addr[2]) + "." + String(ip_addr[3]); Serial.println(ipStr); showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, ipStr.c_str()); }
+void print(const char *text) {
+    Serial.print(text);
+    showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text);
+}
 
-void initTft() { uint16_t ID = tft.readID(); if (ID == 0xD3D3) ID = 0x9481; tft.begin(ID); tft.setRotation(0); tft.fillScreen(BLACK); }
+void println(const char *text) {
+    Serial.println(text);
+    showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text);
+}
+
+void println(String text) {
+    Serial.println(text);
+    showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, text.c_str());
+}
+
+void println(const IPAddress &ip_addr) {
+    String ipStr = String(ip_addr[0]) + "." + String(ip_addr[1]) + "." + String(ip_addr[2]) + "." + String(ip_addr[3]);
+    Serial.println(ipStr);
+    showmsgXY(SCREEN_PRINT_BASE_X, SCREEN_PRINT_BASE_Y, 1, NULL, ipStr.c_str());
+}
+
+void initTft() {
+    uint16_t ID = tft.readID();
+    if (ID == 0xD3D3) ID = 0x9481;
+    tft.begin(ID);
+    tft.setRotation(0);
+    tft.fillScreen(BLACK);
+}
 
 void initNetwork() {
     println("Initialize Ethernet with DHCP:");
     if (Ethernet.begin(mac) == 0) {
         println("Failed to configure Ethernet using DHCP");
-        if (Ethernet.hardwareStatus() == EthernetNoHardware) { println("Ethernet shield was not found. Halting."); while (true) { delay(1); } }
+        if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+            println("Ethernet shield was not found. Halting.");
+            while (true) { delay(1); }
+        }
         if (Ethernet.linkStatus() == LinkOFF) { println("Ethernet cable is not connected."); }
-        println("Attempting to use static IP."); Ethernet.begin(mac, ip, myDns); print("My IP address (static): "); println(Ethernet.localIP());
-    } else { print("DHCP assigned IP: "); println(Ethernet.localIP()); }
+        println("Attempting to use static IP.");
+        Ethernet.begin(mac, ip, myDns);
+        print("My IP address (static): ");
+        println(Ethernet.localIP());
+    } else {
+        print("DHCP assigned IP: ");
+        println(Ethernet.localIP());
+    }
 }
 
 int getIntValue(const String &jsonStringObj, const char *targetKey) {
@@ -643,9 +999,18 @@ int getIntValue(const String &jsonStringObj, const char *targetKey) {
         if (valueEndIndex == -1) { valueEndIndex = jsonStringObj.indexOf('}', valueStartIndex); }
         if (valueStartIndex > 0 && valueEndIndex > valueStartIndex) {
             String valueString = jsonStringObj.substring(valueStartIndex, valueEndIndex);
-            valueString.trim(); return valueString.toInt();
-        } else { print("Error: Could not find value for key '"); print(targetKey); println("'."); }
-    } else { print("Error: Key '"); print(targetKey); println("' not found."); }
+            valueString.trim();
+            return valueString.toInt();
+        } else {
+            print("Error: Could not find value for key '");
+            print(targetKey);
+            println("'.");
+        }
+    } else {
+        print("Error: Key '");
+        print(targetKey);
+        println("' not found.");
+    }
     return 0;
 }
 
@@ -660,14 +1025,18 @@ void drawStickFigure(int16_t x, int16_t y, uint8_t frame, uint16_t color) {
     if (isJugglingActive) {
         int16_t currentRightHandX, currentRightHandY, currentLeftHandX, currentLeftHandY;
         if (frame == 0) {
-            currentLeftHandX = x - armLength; currentLeftHandY = shoulderY + armLength / 2;
+            currentLeftHandX = x - armLength;
+            currentLeftHandY = shoulderY + armLength / 2;
             tft.drawLine(x, shoulderY, currentLeftHandX, currentLeftHandY, color);
-            currentRightHandX = x + armLength; currentRightHandY = shoulderY - armLength / 2;
+            currentRightHandX = x + armLength;
+            currentRightHandY = shoulderY - armLength / 2;
             tft.drawLine(x, shoulderY, currentRightHandX, currentRightHandY, color);
         } else {
-            currentLeftHandX = x - armLength; currentLeftHandY = shoulderY - armLength / 2;
+            currentLeftHandX = x - armLength;
+            currentLeftHandY = shoulderY - armLength / 2;
             tft.drawLine(x, shoulderY, currentLeftHandX, currentLeftHandY, color);
-            currentRightHandX = x + armLength; currentRightHandY = shoulderY + armLength / 2;
+            currentRightHandX = x + armLength;
+            currentRightHandY = shoulderY + armLength / 2;
             tft.drawLine(x, shoulderY, currentRightHandX, currentRightHandY, color);
         }
         if (frame == 0) {
@@ -677,30 +1046,48 @@ void drawStickFigure(int16_t x, int16_t y, uint8_t frame, uint16_t color) {
             tft.drawLine(x, bodyBottomY, x + legLength / 2, y, color);
             tft.drawLine(x, bodyBottomY, x - legLength / 2, y, color);
         }
-        static uint8_t juggle_phase = 0; juggle_phase = (juggle_phase + 1) % 6;
-        int16_t jugglePeakX = x; int16_t jugglePeakY = shoulderY - headRadius * 2 - 20;
+        static uint8_t juggle_phase = 0;
+        juggle_phase = (juggle_phase + 1) % 6;
+        int16_t jugglePeakX = x;
+        int16_t jugglePeakY = shoulderY - headRadius * 2 - 20;
         int16_t ballX_coords[3], ballY_coords[3];
-        uint8_t ball_phases[3] = {juggle_phase, (uint8_t)((juggle_phase + 2) % 6), (uint8_t)((juggle_phase + 4) % 6)};
+        uint8_t ball_phases[3] = {juggle_phase, (uint8_t) ((juggle_phase + 2) % 6), (uint8_t) ((juggle_phase + 4) % 6)};
         for (int i = 0; i < 3; ++i) {
             switch (ball_phases[i]) {
-                case 0: ballX_coords[i] = currentRightHandX; ballY_coords[i] = currentRightHandY - ballRadius; break;
-                case 1: ballX_coords[i] = (currentRightHandX + jugglePeakX) / 2; ballY_coords[i] = (currentRightHandY + jugglePeakY) / 2 - JUGGLE_ARC_HEIGHT; break;
-                case 2: ballX_coords[i] = jugglePeakX; ballY_coords[i] = jugglePeakY - ballRadius; break;
-                case 3: ballX_coords[i] = (jugglePeakX + currentLeftHandX) / 2; ballY_coords[i] = (jugglePeakY + currentLeftHandY) / 2 - JUGGLE_ARC_HEIGHT; break;
-                case 4: ballX_coords[i] = currentLeftHandX; ballY_coords[i] = currentLeftHandY - ballRadius; break;
-                case 5: ballX_coords[i] = (currentLeftHandX + jugglePeakX) / 2; ballY_coords[i] = (currentLeftHandY + jugglePeakY) / 2 - JUGGLE_ARC_HEIGHT; break;
+                case 0: ballX_coords[i] = currentRightHandX;
+                    ballY_coords[i] = currentRightHandY - ballRadius;
+                    break;
+                case 1: ballX_coords[i] = (currentRightHandX + jugglePeakX) / 2;
+                    ballY_coords[i] = (currentRightHandY + jugglePeakY) / 2 - JUGGLE_ARC_HEIGHT;
+                    break;
+                case 2: ballX_coords[i] = jugglePeakX;
+                    ballY_coords[i] = jugglePeakY - ballRadius;
+                    break;
+                case 3: ballX_coords[i] = (jugglePeakX + currentLeftHandX) / 2;
+                    ballY_coords[i] = (jugglePeakY + currentLeftHandY) / 2 - JUGGLE_ARC_HEIGHT;
+                    break;
+                case 4: ballX_coords[i] = currentLeftHandX;
+                    ballY_coords[i] = currentLeftHandY - ballRadius;
+                    break;
+                case 5: ballX_coords[i] = (currentLeftHandX + jugglePeakX) / 2;
+                    ballY_coords[i] = (currentLeftHandY + jugglePeakY) / 2 - JUGGLE_ARC_HEIGHT;
+                    break;
             }
         }
         tft.fillCircle(ballX_coords[0], ballY_coords[0], ballRadius, ballColor1);
         tft.fillCircle(ballX_coords[1], ballY_coords[1], ballRadius, ballColor2);
         tft.fillCircle(ballX_coords[2], ballY_coords[2], ballRadius, ballColor3);
     } else {
-        int16_t leftElbowX_static = x - armLength / 4; int16_t leftElbowY_static = shoulderY + armLength / 2;
-        int16_t leftHandX_static = x - armLength / 3; int16_t leftHandY_static = shoulderY + armLength * 0.9;
+        int16_t leftElbowX_static = x - armLength / 4;
+        int16_t leftElbowY_static = shoulderY + armLength / 2;
+        int16_t leftHandX_static = x - armLength / 3;
+        int16_t leftHandY_static = shoulderY + armLength * 0.9;
         tft.drawLine(x, shoulderY, leftElbowX_static, leftElbowY_static, color);
         tft.drawLine(leftElbowX_static, leftElbowY_static, leftHandX_static, leftHandY_static, color);
-        int16_t rightElbowX_static = x + armLength / 4; int16_t rightElbowY_static = shoulderY + armLength / 2;
-        int16_t rightHandX_static = x + armLength / 3; int16_t rightHandY_static = shoulderY + armLength * 0.9;
+        int16_t rightElbowX_static = x + armLength / 4;
+        int16_t rightElbowY_static = shoulderY + armLength / 2;
+        int16_t rightHandX_static = x + armLength / 3;
+        int16_t rightHandY_static = shoulderY + armLength * 0.9;
         tft.drawLine(x, shoulderY, rightElbowX_static, rightElbowY_static, color);
         tft.drawLine(rightElbowX_static, rightElbowY_static, rightHandX_static, rightHandY_static, color);
         tft.drawLine(x, bodyBottomY, x - legLength / 3, y, color);
@@ -712,16 +1099,35 @@ void drawStickFigure(int16_t x, int16_t y, uint8_t frame, uint16_t color) {
     }
 }
 
-void fillRectExclude(int16_t r1x, int16_t r1y, int16_t r1w, int16_t r1h, int16_t r2x, int16_t r2y, int16_t r2w, int16_t r2h, uint16_t color) {
+void fillRectExclude(int16_t r1x, int16_t r1y, int16_t r1w, int16_t r1h, int16_t r2x, int16_t r2y, int16_t r2w,
+                     int16_t r2h, uint16_t color) {
     if (r1w <= 0 || r1h <= 0) return;
-    if (r1x + r1w <= r2x || r1x >= r2x + r2w || r1y + r1h <= r2y || r1y >= r2y + r2h) { tft.fillRect(r1x, r1y, r1w, r1h, color); return; }
-    if (r1y < r2y) { int16_t h = min(r1h, r2y - r1y); if (h > 0) tft.fillRect(r1x, r1y, r1w, h, color); }
-    if (r1y + r1h > r2y + r2h) { int16_t y_start = max(r1y, r2y + r2h); int16_t h = (r1y + r1h) - y_start; if (h > 0) tft.fillRect(r1x, y_start, r1w, h, color); }
-    int16_t y_middle_strip_start = max(r1y, r2y); int16_t y_middle_strip_end = min(r1y + r1h, r2y + r2h);
+    if (r1x + r1w <= r2x || r1x >= r2x + r2w || r1y + r1h <= r2y || r1y >= r2y + r2h) {
+        tft.fillRect(r1x, r1y, r1w, r1h, color);
+        return;
+    }
+    if (r1y < r2y) {
+        int16_t h = min(r1h, r2y - r1y);
+        if (h > 0) tft.fillRect(r1x, r1y, r1w, h, color);
+    }
+    if (r1y + r1h > r2y + r2h) {
+        int16_t y_start = max(r1y, r2y + r2h);
+        int16_t h = (r1y + r1h) - y_start;
+        if (h > 0) tft.fillRect(r1x, y_start, r1w, h, color);
+    }
+    int16_t y_middle_strip_start = max(r1y, r2y);
+    int16_t y_middle_strip_end = min(r1y + r1h, r2y + r2h);
     int16_t h_middle_strip = y_middle_strip_end - y_middle_strip_start;
     if (h_middle_strip > 0) {
-        if (r1x < r2x) { int16_t w = min(r1w, r2x - r1x); if (w > 0) tft.fillRect(r1x, y_middle_strip_start, w, h_middle_strip, color); }
-        if (r1x + r1w > r2x + r2w) { int16_t x_start = max(r1x, r2x + r2w); int16_t w = (r1x + r1w) - x_start; if (w > 0) tft.fillRect(x_start, y_middle_strip_start, w, h_middle_strip, color); }
+        if (r1x < r2x) {
+            int16_t w = min(r1w, r2x - r1x);
+            if (w > 0) tft.fillRect(r1x, y_middle_strip_start, w, h_middle_strip, color);
+        }
+        if (r1x + r1w > r2x + r2w) {
+            int16_t x_start = max(r1x, r2x + r2w);
+            int16_t w = (r1x + r1w) - x_start;
+            if (w > 0) tft.fillRect(x_start, y_middle_strip_start, w, h_middle_strip, color);
+        }
     }
 }
 
@@ -750,15 +1156,16 @@ void drawSun(int glow) {
             int16_t gaugeBoxY = tft.height() / 2 - gaugeEffectiveRadius;
             int16_t gaugeBoxW = gaugeEffectiveRadius * 2;
             int16_t gaugeBoxH = gaugeEffectiveRadius * 2;
-            fillRectExclude(sunClearAreaX, sunClearAreaY, sunClearAreaW, sunClearAreaH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+            fillRectExclude(sunClearAreaX, sunClearAreaY, sunClearAreaW, sunClearAreaH, gaugeBoxX, gaugeBoxY, gaugeBoxW,
+                            gaugeBoxH, DAY_BG_COLOR);
         }
     }
 
     if (glow <= 0 || isProbablyNight) return;
 
     float glowFactor = constrain(glow, 0, 5000) / 5000.0f;
-    uint8_t currentNumRays = MIN_NUM_RAYS + (uint8_t)(glowFactor * (MAX_NUM_RAYS - MIN_NUM_RAYS));
-    int16_t currentRayLength = MIN_RAY_LENGTH + (int16_t)(glowFactor * (MAX_RAY_LENGTH - MIN_RAY_LENGTH));
+    uint8_t currentNumRays = MIN_NUM_RAYS + (uint8_t) (glowFactor * (MAX_NUM_RAYS - MIN_NUM_RAYS));
+    int16_t currentRayLength = MIN_RAY_LENGTH + (int16_t) (glowFactor * (MAX_RAY_LENGTH - MIN_RAY_LENGTH));
     int16_t sunX = tft.width() - SUN_BODY_RADIUS - currentRayLength - SCREEN_EDGE_PADDING;
     int16_t sunY = SUN_BODY_RADIUS + currentRayLength + SCREEN_EDGE_PADDING;
 
@@ -776,6 +1183,7 @@ void drawSun(int glow) {
         }
     }
 }
+
 void drawEnergyValueText(float energyValue) {
     // This function is designed to be called only during the day.
 
@@ -795,7 +1203,7 @@ void drawEnergyValueText(float energyValue) {
     // --- Prepare Text ---
     char numberBuffer[10]; // For "XXXXX.X"
     dtostrf(energyValue, 1, 1, numberBuffer);
-    const char* currencySymbol = "E"; // Using "E"
+    const char *currencySymbol = "E"; // Using "E"
 
     // --- Get Text Dimensions ---
     int16_t x1_num, y1_num, x1_currency, y1_currency;
@@ -922,7 +1330,7 @@ void drawGauge(const int value, const int value2, const int centerX, const int c
             tft.drawLine(centerX, centerY, x_arc, y_arc, fillColor);
         }
     }
-    tft.fillCircle(centerX, centerY, radius - 10, WHITE);
+    tft.fillCircle(centerX, centerY, radius - 10, isProbablyNight? NIGHT_BG_COLOR : WHITE);
     float endAngleValue2 = startAngle + (max(0, min(100, value2)) / 100.0f) * (PI * 1.5f);
     if (value2 > 0) {
         for (float angle = startAngle; angle <= endAngleValue2; angle += 0.0666f) {
@@ -931,7 +1339,9 @@ void drawGauge(const int value, const int value2, const int centerX, const int c
             tft.drawLine(centerX, centerY, x_arc, y_arc, RED);
         }
     }
-    tft.fillCircle(centerX, centerY, radius - 12, WHITE);
+
+
+    tft.fillCircle(centerX, centerY, radius - 12, isProbablyNight? NIGHT_BG_COLOR : WHITE);
 
     String valueString = String(value);
     String percentSign = "%";
@@ -940,8 +1350,12 @@ void drawGauge(const int value, const int value2, const int centerX, const int c
     uint16_t w_num, h_num, w_pct, h_pct;
     const GFXfont *numFont = &FreeSevenSegNumFont;
     const GFXfont *pctFont = &FreeBigFont;
-    tft.setFont(numFont); tft.setTextSize(1); tft.getTextBounds(valueString, 0, 0, &x1_num, &y1_num, &w_num, &h_num);
-    tft.setFont(pctFont); tft.setTextSize(1); tft.getTextBounds(percentSign, 0, 0, &x1_pct, &y1_pct, &w_pct, &h_pct);
+    tft.setFont(numFont);
+    tft.setTextSize(1);
+    tft.getTextBounds(valueString, 0, 0, &x1_num, &y1_num, &w_num, &h_num);
+    tft.setFont(pctFont);
+    tft.setTextSize(1);
+    tft.getTextBounds(percentSign, 0, 0, &x1_pct, &y1_pct, &w_pct, &h_pct);
     int16_t overall_min_y1_offset = min(y1_num, y1_pct);
     int16_t overall_max_y_plus_h_offset = max(y1_num + h_num, y1_pct + h_pct);
     int16_t total_visual_height = overall_max_y_plus_h_offset - overall_min_y1_offset;
@@ -951,8 +1365,16 @@ void drawGauge(const int value, const int value2, const int centerX, const int c
     int16_t cursor_x_num = num_bitmap_start_x - x1_num;
     int16_t pct_bitmap_start_x = num_bitmap_start_x + w_num + kerning;
     int16_t cursor_x_pct = pct_bitmap_start_x - x1_pct;
-    tft.setFont(numFont); tft.setTextColor(textColor); tft.setTextSize(1); tft.setCursor(cursor_x_num, common_baseline_y); tft.print(valueString);
-    tft.setFont(pctFont); tft.setTextColor(textColor); tft.setTextSize(1); tft.setCursor(cursor_x_pct, common_baseline_y); tft.print(percentSign);
+    tft.setFont(numFont);
+    tft.setTextColor(textColor);
+    tft.setTextSize(1);
+    tft.setCursor(cursor_x_num, common_baseline_y);
+    tft.print(valueString);
+    tft.setFont(pctFont);
+    tft.setTextColor(textColor);
+    tft.setTextSize(1);
+    tft.setCursor(cursor_x_pct, common_baseline_y);
+    tft.print(percentSign);
     tft.setFont(NULL);
 }
 
@@ -962,20 +1384,49 @@ void httpRequest() {
     if (client.connect(server, 80)) {
         println("Connecting to server...");
         client.println("GET /status HTTP/1.0");
-        String hostHeader = "Host: "; hostHeader += server; client.println(hostHeader);
-        client.println("User-Agent: arduino-ethernet"); client.println("Connection: close"); client.println();
+        String hostHeader = "Host: ";
+        hostHeader += server;
+        client.println(hostHeader);
+        client.println("User-Agent: arduino-ethernet");
+        client.println("Connection: close");
+        client.println();
         unsigned long timeout = millis();
-        while (client.available() == 0) { if (millis() - timeout > 5000) { println(">>> Client Timeout!"); client.stop(); goto end_request_logic; } }
-        String responseData = ""; unsigned long readTimeout = millis();
-        while (client.connected() || client.available()) {
-            if (client.available()) { responseData += (char)client.read(); readTimeout = millis(); }
-            if (millis() - readTimeout > 1000) { println(">>> Read Timeout during response."); break; }
+        while (client.available() == 0) {
+            if (millis() - timeout > 5000) {
+                println(">>> Client Timeout!");
+                client.stop();
+                lastConnectionTime = millis(); // <<< ADDED: Update time on this failure
+                goto end_request_logic;
+            }
         }
-        client.stop();
-        int jsonStartIndex = responseData.indexOf('{'); int jsonEndIndex = responseData.lastIndexOf('}');
+        String responseData = "";
+        unsigned long readTimeout = millis();
+        while (client.connected() || client.available()) {
+            if (client.available()) {
+                responseData += (char) client.read();
+                readTimeout = millis();
+            }
+            if (millis() - readTimeout > 10000) {
+                println(">>> Read Timeout during response.");
+                // Note: If we break here, lastConnectionTime might not be updated by the success path.
+                lastConnectionTime = millis();
+                // For now, focusing on the goto paths.
+                break;
+            }
+        }
+        // client.stop(); // Moved further down or handled by subsequent client.connect
+
+        int jsonStartIndex = responseData.indexOf('{');
+        int jsonEndIndex = responseData.lastIndexOf('}');
         String jsonData = "";
-        if (jsonStartIndex != -1 && jsonEndIndex != -1 && jsonEndIndex > jsonStartIndex) { jsonData = responseData.substring(jsonStartIndex, jsonEndIndex + 1); }
-        else { println("No JSON data found in response."); goto end_request_logic; }
+        if (jsonStartIndex != -1 && jsonEndIndex != -1 && jsonEndIndex > jsonStartIndex) {
+            jsonData = responseData.substring(jsonStartIndex, jsonEndIndex + 1);
+        } else {
+            println("No JSON data found in response.");
+            client.stop(); // Ensure client is stopped before goto
+            lastConnectionTime = millis(); // <<< ADDED: Update time on this failure
+            goto end_request_logic;
+        }
 
         const char *BDCStateOfChargeKey = "\"BDCStateOfCharge\":";
         ::mvalue_soc = getIntValue(jsonData, BDCStateOfChargeKey);
@@ -991,15 +1442,13 @@ void httpRequest() {
 
         const char *PVTotalPowerKey = "\"PVTotalPower\":";
         int mvalue2 = getIntValue(jsonData, PVTotalPowerKey);
-        isProbablyNight = mvalue2 < 50;
+        isProbablyNight = mvalue2 < 50; // Corrected: Use mvalue2 to determine night
 
-        if (isProbablyNight) { tft.fillScreen(NIGHT_BG_COLOR); }
-        else {
-           tft.fillRect(0, 0, tft.width(), tft.height() - FIELD_HEIGHT, DAY_BG_COLOR);
-           tft.fillRect(0, tft.height() - FIELD_HEIGHT, tft.width(), FIELD_HEIGHT, GREEN);
-           drawEnergyValueText(::selfOutputEnergyTotal_calculated); // Draw energy text on sky
+        if (isProbablyNight) { tft.fillScreen(NIGHT_BG_COLOR); } else {
+            tft.fillRect(0, 0, tft.width(), tft.height() - FIELD_HEIGHT, DAY_BG_COLOR);
+            tft.fillRect(0, tft.height() - FIELD_HEIGHT, tft.width(), FIELD_HEIGHT, GREEN);
+            drawEnergyValueText(::selfOutputEnergyTotal_calculated); // Draw energy text on sky
         }
-        setupNightScene();
 
         const char *TotalLoadPowerKey = "\"BDCDischargePower\":";
         int tvalue = getIntValue(jsonData, TotalLoadPowerKey);
@@ -1009,29 +1458,45 @@ void httpRequest() {
         if (!isProbablyNight) {
             drawSun(mvalue2);
         }
-        lastConnectionTime = millis();
+        lastConnectionTime = millis(); // This is the main success path update
         requestLogicCompleted = true;
     } else {
         println("Connection failed.");
-        lastConnectionTime = millis();
+        lastConnectionTime = millis(); // Updated on client.connect() failure
     }
+
+    client.stop(); // Ensure client is stopped before exiting function or reaching end_request_logic
 
 end_request_logic:
     stickFigureX = stickFigureWidth / 2 + 1;
     stickFigureFrame = 0;
     if (!requestLogicCompleted) {
-        if (isProbablyNight) { tft.fillScreen(NIGHT_BG_COLOR); }
-        else {
-           tft.fillRect(0, 0, tft.width(), tft.height() - FIELD_HEIGHT, DAY_BG_COLOR);
-           tft.fillRect(0, tft.height() - FIELD_HEIGHT, tft.width(), FIELD_HEIGHT, GREEN);
-           drawEnergyValueText(::selfOutputEnergyTotal_calculated); // Also draw if request failed but it's day
+        // If the request didn't complete its main logic (e.g., due to goto or client.connect failure)
+        // And lastConnectionTime was just updated by one of the failure paths,
+        // the background might need to be redrawn if it wasn't by the success path.
+        // However, the success path already draws the background.
+        // This block mainly handles the case where client.connect itself failed,
+        // or a goto happened AND we want to ensure a clean background.
+
+        // Check if lastConnectionTime was updated in this httpRequest call.
+        // If it was a very early failure (e.g. client.connect failed), then lastConnectionTime is fresh.
+        // If it was a goto, we've now added lines to update lastConnectionTime.
+        // So, lastConnectionTime should be fresh.
+
+        // The original logic for redrawing if !requestLogicCompleted:
+        if (isProbablyNight) { tft.fillScreen(NIGHT_BG_COLOR); } else {
+            tft.fillRect(0, 0, tft.width(), tft.height() - FIELD_HEIGHT, DAY_BG_COLOR);
+            tft.fillRect(0, tft.height() - FIELD_HEIGHT, tft.width(), FIELD_HEIGHT, GREEN);
+            drawEnergyValueText(::selfOutputEnergyTotal_calculated);
+            // Potentially draw gauge and sun with last known good values if request failed?
+            // For now, matching original behavior of only drawing them on success.
         }
     }
 }
 
 void setup() {
     Serial.begin(115200);
-    while (!Serial) {;}
+    while (!Serial) { ; }
     println("Serial Initialized.");
     initTft();
     println("TFT Initialized.");
@@ -1039,8 +1504,6 @@ void setup() {
     stickFigureX = stickFigureWidth / 2 + 1;
     stickFigureWaveX = stickFigureX;
     stickFigureWaveY = stickFigureY;
-    lastWaveFrameTime = millis();
-    lastFrameTime = millis();
     isJugglingActive = true;
     prevFrameWasJuggling = true;
     mvalue_soc = 100;
@@ -1050,12 +1513,66 @@ void setup() {
     println("Night Scene Setup Done (stars initialized).");
     initNetwork();
     println("Network Initialized.");
+    // Initialize bird state
+    game_bird.is_active = false;
+    // Schedule first potential appearance
+    game_bird.next_event_time = millis() + random(BIRD_MIN_OFFSCREEN_DURATION, BIRD_MAX_OFFSCREEN_DURATION);
+
+
+    lastWaveFrameTime = millis();
+    lastFrameTime = millis();
 }
 
 void animateNight() {
     unsigned long currentTime = millis();
-    drawMoon();
+
+    // --- Add these Serial prints for debugging ---
+    //Serial.print("AN Start: CT="); Serial.print(currentTime);
+    //Serial.print(" | MPCST_before="); Serial.print(moonPhaseCycleStartTime);
+    // --- End of new Serial prints ---
+
+    // --- Update Moon Phase ---
+    if (moonPhaseCycleStartTime == 0) { // Initialize on first night animation call
+        moonPhaseCycleStartTime = currentTime;
+        currentMoonPhaseProgress = 0.0f;
+        // --- Add this Serial print ---
+        Serial.print(" | MPCST_Init_to="); Serial.print(moonPhaseCycleStartTime);
+        // --- End of new Serial print ---
+    }
+
+    unsigned long elapsedInCycle = currentTime - moonPhaseCycleStartTime;
+    // --- Add this Serial print ---
+    //Serial.print(" | EIC="); Serial.print(elapsedInCycle);
+    // --- End of new Serial print ---
+
+    if (elapsedInCycle >= MOON_FULL_CYCLE_DURATION_MS) {
+        // Cycle complete, reset to full moon
+        moonPhaseCycleStartTime = currentTime; // Start new cycle
+        currentMoonPhaseProgress = 0.0f;
+        elapsedInCycle = 0; // Reset elapsed time for current frame calculation
+        // --- Add these Serial prints ---
+        //Serial.print(" | MPCST_Reset_to="); Serial.print(moonPhaseCycleStartTime);
+        //Serial.print(" | EIC_after_Reset="); Serial.print(elapsedInCycle);
+        // --- End of new Serial prints ---
+    }
+    // Calculate current progress (0.0 = full, 1.0 = new moon)
+    currentMoonPhaseProgress = (float)elapsedInCycle / MOON_FULL_CYCLE_DURATION_MS;
+    // --- Add this Serial print ---
+    //Serial.print(" | Prog="); Serial.println(currentMoonPhaseProgress, 4); // 4 decimal places
+    // --- End of new Serial print ---
+
+
+    // 1. Update and draw the stars first.
     updateAndDrawStars(currentTime);
+
+    delay(333); // Existing delay
+
+    // 2. Draw the moon (now with phasing).
+    drawMoon(); // This function will now use currentMoonPhaseProgress
+
+    delay(333); // Existing delay
+
+    // 3. Draw the sleeping stickman.
     drawStickManSleeping();
 }
 
@@ -1111,23 +1628,30 @@ void walk(unsigned long wait) {
             int16_t ballClearZoneH = ballClearZone_BottomY - ballClearZoneY;
 
             if (ballClearZoneH > 0) {
-                if (ballClearZoneY < fieldTopPixelVal) { // Sky part
+                if (ballClearZoneY < fieldTopPixelVal) {
+                    // Sky part
                     int16_t skyBallsClearH = min(ballClearZoneH, fieldTopPixelVal - ballClearZoneY);
-                    if (skyBallsClearH > 0) fillRectExclude(ballClearZoneX, ballClearZoneY, ballClearZoneW, skyBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, DAY_BG_COLOR);
+                    if (skyBallsClearH > 0) fillRectExclude(ballClearZoneX, ballClearZoneY, ballClearZoneW,
+                                                            skyBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH,
+                                                            DAY_BG_COLOR);
                 }
                 int16_t fieldBallsClearY_juggle = max(ballClearZoneY, fieldTopPixelVal); // Grass part
                 if (fieldBallsClearY_juggle < ballClearZoneY + ballClearZoneH) {
                     int16_t fieldBallsClearH = (ballClearZoneY + ballClearZoneH) - fieldBallsClearY_juggle;
-                    if (fieldBallsClearH > 0) fillRectExclude(ballClearZoneX, fieldBallsClearY_juggle, ballClearZoneW, fieldBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+                    if (fieldBallsClearH > 0) fillRectExclude(ballClearZoneX, fieldBallsClearY_juggle, ballClearZoneW,
+                                                              fieldBallsClearH, gaugeBoxX, gaugeBoxY, gaugeBoxW,
+                                                              gaugeBoxH, GREEN);
                 }
             }
-        } else { // Static balls
+        } else {
+            // Static balls
             int16_t ballGroundY_clear = prevStickFigureY_feet - ballRadius;
             int16_t staticBallsClearWidth = armLength + (2 * ballRadius) + 4;
             int16_t staticBallsClearHeight = (2 * ballRadius) + 2;
             int16_t staticBallsClearX = prevStickFigureX_center - staticBallsClearWidth / 2;
             int16_t staticBallsClearY = ballGroundY_clear - ballRadius - 1;
-            fillRectExclude(staticBallsClearX, staticBallsClearY, staticBallsClearWidth, staticBallsClearHeight, gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
+            fillRectExclude(staticBallsClearX, staticBallsClearY, staticBallsClearWidth, staticBallsClearHeight,
+                            gaugeBoxX, gaugeBoxY, gaugeBoxW, gaugeBoxH, GREEN);
         }
 
 
@@ -1160,7 +1684,8 @@ void walk(unsigned long wait) {
             int16_t anim_new_w = sf_body_w;
             int16_t anim_new_h = sf_body_h;
 
-            if (isJugglingActive) { // Expand bounding box for juggling balls
+            if (isJugglingActive) {
+                // Expand bounding box for juggling balls
                 int16_t shoulderY_new = (currentStickFigureY_feet - legLength - bodyLength) + bodyLength / 4;
                 int16_t jugglePeakY_new = shoulderY_new - headRadius * 2 - 20;
                 int16_t sf_balls_new_x = currentStickFigureX_center - armLength - ballRadius - 10;
@@ -1189,7 +1714,8 @@ void walk(unsigned long wait) {
             int16_t anim_prev_w = sf_body_w;
             int16_t anim_prev_h = sf_body_h;
 
-            if (prevFrameWasJuggling) { // Expand bounding box for previous juggling balls
+            if (prevFrameWasJuggling) {
+                // Expand bounding box for previous juggling balls
                 int16_t shoulderY_prev = (prevStickFigureY_feet - legLength - bodyLength) + bodyLength / 4;
                 int16_t jugglePeakY_prev = shoulderY_prev - headRadius * 2 - 20;
                 int16_t sf_balls_prev_x = prevStickFigureX_center - armLength - ballRadius - 10;
@@ -1209,12 +1735,16 @@ void walk(unsigned long wait) {
             }
 
             // Check overlap with the comprehensive animation bounding boxes
-            bool new_anim_overlaps_sign_panel = checkRectOverlap(anim_new_x, anim_new_y, anim_new_w, anim_new_h, g_signRectX, g_signRectY, g_signWidth, g_signHeight);
-            bool new_anim_overlaps_pole = checkRectOverlap(anim_new_x, anim_new_y, anim_new_w, anim_new_h, g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight);
+            bool new_anim_overlaps_sign_panel = checkRectOverlap(anim_new_x, anim_new_y, anim_new_w, anim_new_h,
+                                                                 g_signRectX, g_signRectY, g_signWidth, g_signHeight);
+            bool new_anim_overlaps_pole = checkRectOverlap(anim_new_x, anim_new_y, anim_new_w, anim_new_h, g_poleRectX,
+                                                           g_poleRectY, g_poleWidth, g_poleHeight);
             bool current_anim_full_overlaps = new_anim_overlaps_sign_panel || new_anim_overlaps_pole;
 
-            bool prev_anim_overlaps_sign_panel = checkRectOverlap(anim_prev_x, anim_prev_y, anim_prev_w, anim_prev_h, g_signRectX, g_signRectY, g_signWidth, g_signHeight);
-            bool prev_anim_overlaps_pole = checkRectOverlap(anim_prev_x, anim_prev_y, anim_prev_w, anim_prev_h, g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight);
+            bool prev_anim_overlaps_sign_panel = checkRectOverlap(anim_prev_x, anim_prev_y, anim_prev_w, anim_prev_h,
+                                                                  g_signRectX, g_signRectY, g_signWidth, g_signHeight);
+            bool prev_anim_overlaps_pole = checkRectOverlap(anim_prev_x, anim_prev_y, anim_prev_w, anim_prev_h,
+                                                            g_poleRectX, g_poleRectY, g_poleWidth, g_poleHeight);
             bool previous_anim_full_overlapped = prev_anim_overlaps_sign_panel || prev_anim_overlaps_pole;
 
             if (current_anim_full_overlaps || previous_anim_full_overlapped) {
@@ -1235,35 +1765,90 @@ void walk(unsigned long wait) {
         prevFrameWasJuggling = isJugglingActive; // Update for next frame's clearing logic
     }
 }
+
 signed long mainLoopIterationCounter = 0; // Initialize
 
 void loop() {
     mainLoopIterationCounter++;
-    if (client.connected() && client.available()) { char c = client.read(); Serial.write(c); }
+    // if (client.connected() && client.available()) { char c = client.read(); Serial.write(c); } // Keep if needed for debug
     unsigned long currentMillis = millis();
 
-    if ( lastConnectionTime == 0 || currentMillis - lastConnectionTime > postingInterval) {
+    unsigned long thispostingInterval;
+    if (isProbablyNight)
+        thispostingInterval = 3*postingInterval;
+    else
+        thispostingInterval = postingInterval;
+
+    if (lastConnectionTime == 0 || currentMillis - lastConnectionTime > thispostingInterval) {
         bool wasNightBeforeRequest = isProbablyNight;
         httpRequest();
-        if (isProbablyNight != wasNightBeforeRequest) { currentDaytimeState = ANIM_NONE; }
+        if (isProbablyNight != wasNightBeforeRequest) {
+            // currentDaytimeState = ANIM_WAVING; // REMOVE THIS LINE or make conditional
+            if (isProbablyNight) { // If it just became night
+                currentDaytimeState = ANIM_NONE;
+            }
+            // If it just became day, the existing logic below will set determinedNextState to ANIM_WAVING.
+            if (isProbablyNight && game_bird.is_active) {
+                // If bird was active and it becomes night
+                // Clear bird immediately
+                int16_t clear_w = (BIRD_WING_SPAN * 2) + 1;
+                int16_t clear_h = (BIRD_WING_LIFT * 2) + 1;
+                int16_t clear_x = game_bird.prev_x - BIRD_WING_SPAN;
+                int16_t clear_y = game_bird.prev_y - BIRD_WING_LIFT;
+                tft.fillRect(clear_x, clear_y, clear_w, clear_h, NIGHT_BG_COLOR); // Use night color
+                game_bird.is_active = false; // Deactivate
+                // Reschedule for next potential day
+                game_bird.next_event_time = currentMillis + random(BIRD_MIN_OFFSCREEN_DURATION,
+                                                                   BIRD_MAX_OFFSCREEN_DURATION);
+            }
+        }
     }
 
     if (isProbablyNight) {
-        if (currentDaytimeState != ANIM_NONE) { currentDaytimeState = ANIM_NONE; }
+        currentDaytimeState = ANIM_NONE;
+        // If bird was somehow active, ensure it's cleared and reset (covered by httpRequest transition)
         animateNight();
     } else {
+        // It's Daytime
         DaytimeAnimationState determinedNextState;
-        if ( currentMillis - lastConnectionTime > 0 && currentMillis - lastConnectionTime < 5000){ determinedNextState = ANIM_WAVING; }
-        else { determinedNextState = ANIM_WALKING; }
+
+        // --- MODIFIED LOGIC for determinedNextState ---
+        if (currentMillis - lastConnectionTime <= 5000) {
+            // Wave for 5 seconds after the last HTTP request
+            determinedNextState = ANIM_WAVING;
+        } else {
+            // More than 5 seconds have passed since the last HTTP request,
+            // and it's not yet time for the next periodic one.
+            determinedNextState = ANIM_WALKING;
+            // If you need to debug the time difference, use Serial.print:
+            // Serial.print("Time since last HTTP for walking: ");
+            // Serial.println(currentMillis - lastConnectionTime);
+        }
+        // --- END OF MODIFIED LOGIC ---
 
         if (determinedNextState != currentDaytimeState) {
-            if (currentDaytimeState == ANIM_WALKING) { clearCompleteWalkingAnimationArea(stickFigureX, stickFigureY); }
-            else if (currentDaytimeState == ANIM_WAVING) { clearWavingStickmanArea(stickFigureWaveX, stickFigureWaveY); }
+            if (currentDaytimeState ==
+                ANIM_WALKING) { clearCompleteWalkingAnimationArea(stickFigureX, stickFigureY); } else if (
+                currentDaytimeState == ANIM_WAVING) { clearWavingStickmanArea(stickFigureWaveX, stickFigureWaveY); }
+            // Note: No specific clearing is done here if currentDaytimeState is ANIM_NONE,
+            // as httpRequest() (if it runs) will do a full screen clear.
+
+            if (determinedNextState == ANIM_WAVING) {
+                // Set waving position when switching to waving
+                stickFigureWaveX = stickFigureX; // stickFigureX is reset by httpRequest
+                stickFigureWaveY = stickFigureY;
+            }
             currentDaytimeState = determinedNextState;
         }
 
-        if (currentDaytimeState == ANIM_WALKING) { walk(0); }
-        else if (currentDaytimeState == ANIM_WAVING) { waveAnimation(); }
+        if (currentDaytimeState == ANIM_WALKING) { walk(0); } else if (currentDaytimeState == ANIM_WAVING) {
+            waveAnimation();
+        }
+
+        update_and_draw_bird();
     }
-    delay(100);
+    if (isProbablyNight)
+        delay(66666);
+    else
+        delay(66); // Reduced delay from 100 to 50 for smoother bird/animations
 }
